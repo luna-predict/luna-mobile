@@ -1,75 +1,177 @@
-import React from 'react';
-import { View, Text, SafeAreaView, ScrollView } from 'react-native';
+import React, { useState, useMemo, useRef } from 'react';
+import { View, Text, SafeAreaView, ScrollView, TouchableOpacity, Animated, StyleSheet } from 'react-native';
 import { useMode } from '../context/ModeContext';
-import { Calendar } from 'lucide-react-native';
+
+const WEEKDAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+// Generate a simple month grid
+function generateMonthGrid(year: number, month: number) {
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells: (number | null)[] = [];
+  for (let i = 0; i < firstDay; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  return cells;
+}
 
 export default function CalendarScreen() {
   const { themeColors, currentMode } = useMode();
+  const today = new Date();
+  const [monthOffset, setMonthOffset] = useState(0);
+
+  const viewDate = useMemo(() => {
+    const d = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
+    return d;
+  }, [monthOffset]);
+
+  const cells = useMemo(() => generateMonthGrid(viewDate.getFullYear(), viewDate.getMonth()), [viewDate]);
+  const monthLabel = viewDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  // Mock cycle data
+  const periodDays = [1, 2, 3, 4, 5];
+  const fertileDays = [12, 13, 14, 15, 16];
+  const ovulationDay = 14;
+  const isCurrentMonth = monthOffset === 0;
+
+  const getCellStyle = (day: number) => {
+    if (!isCurrentMonth) return { bg: 'transparent', text: '#334155', border: 'transparent' };
+    if (periodDays.includes(day)) return { bg: themeColors.primary, text: '#fff', border: themeColors.primary };
+    if (day === ovulationDay) return { bg: '#f59e0b', text: '#fff', border: '#f59e0b' };
+    if (fertileDays.includes(day)) return { bg: '#fef3c7', text: '#b45309', border: '#fde68a' };
+    if (day === today.getDate() && isCurrentMonth) return { bg: themeColors.primary + '15', text: themeColors.primary, border: themeColors.primary };
+    return { bg: 'transparent', text: '#334155', border: 'transparent' };
+  };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: themeColors.background }}>
-      <View className="px-6 py-4 flex-row justify-between items-center z-20 bg-white border-b border-slate-200/50" style={{ backgroundColor: themeColors.card }}>
-        <Text className="text-xl font-bold text-slate-800 tracking-tight">
+    <SafeAreaView style={[styles.container, { backgroundColor: themeColors.background }]}>
+      {/* Header */}
+      <View style={[styles.header, { backgroundColor: themeColors.card }]}>
+        <Text style={styles.headerTitle}>
           Cycle <Text style={{ color: themeColors.primary }}>Calendar</Text>
         </Text>
-        <Calendar color={themeColors.primary} size={24} />
       </View>
 
-      <ScrollView className="flex-1 p-4">
-        {/* Mock Calendar Header */}
-        <View className="flex-row justify-between items-center mb-6">
-          <Text className="text-lg font-bold text-slate-700">June 2026</Text>
-          <View className="flex-row gap-2">
-            <View className="w-8 h-8 bg-slate-100 rounded-full items-center justify-center"><Text className="text-slate-500 font-bold">{"<"}</Text></View>
-            <View className="w-8 h-8 bg-slate-100 rounded-full items-center justify-center"><Text className="text-slate-500 font-bold">{">"}</Text></View>
+      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
+        {/* Month Navigation */}
+        <View style={styles.monthNav}>
+          <TouchableOpacity onPress={() => setMonthOffset(o => o - 1)} style={styles.navBtn}>
+            <Text style={styles.navBtnText}>‹</Text>
+          </TouchableOpacity>
+          <Text style={styles.monthLabel}>{monthLabel}</Text>
+          <TouchableOpacity onPress={() => setMonthOffset(o => o + 1)} style={styles.navBtn}>
+            <Text style={styles.navBtnText}>›</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Calendar Grid */}
+        <View style={[styles.calendarCard, { backgroundColor: themeColors.card }]}>
+          {/* Weekday headers */}
+          <View style={styles.weekdayRow}>
+            {WEEKDAYS.map((d, i) => (
+              <Text key={i} style={styles.weekdayText}>{d}</Text>
+            ))}
+          </View>
+
+          {/* Day cells */}
+          <View style={styles.dayGrid}>
+            {cells.map((day, i) => {
+              if (day === null) return <View key={`e-${i}`} style={styles.dayCell} />;
+              const cs = getCellStyle(day);
+              return (
+                <TouchableOpacity
+                  key={day}
+                  style={[styles.dayCell, { backgroundColor: cs.bg, borderColor: cs.border, borderWidth: cs.border !== 'transparent' ? 1.5 : 0 }]}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.dayText, { color: cs.text }]}>{day}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
         </View>
 
-        {/* Mock Calendar Grid */}
-        <View className="bg-white rounded-2xl p-4 shadow-sm border border-slate-100" style={{ shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10 }}>
-          <View className="flex-row justify-between mb-4">
-            {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, i) => (
-              <Text key={i} className="text-slate-400 font-bold w-8 text-center">{day}</Text>
-            ))}
+        {/* Legend */}
+        <View style={[styles.legendCard, { backgroundColor: themeColors.card }]}>
+          <Text style={styles.legendTitle}>Legend</Text>
+          <View style={styles.legendRow}>
+            <View style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: themeColors.primary }]} />
+              <Text style={styles.legendText}>Period</Text>
+            </View>
+            <View style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: '#fde68a' }]} />
+              <Text style={styles.legendText}>Fertile</Text>
+            </View>
+            <View style={styles.legendItem}>
+              <View style={[styles.legendDot, { backgroundColor: '#f59e0b' }]} />
+              <Text style={styles.legendText}>Ovulation</Text>
+            </View>
           </View>
-          <View className="flex-row flex-wrap justify-between gap-y-4">
-            {Array.from({ length: 30 }).map((_, i) => {
-              const day = i + 1;
-              let isPeriod = day >= 1 && day <= 5;
-              let isFertile = day >= 12 && day <= 16;
-              let isOvulation = day === 14;
+        </View>
 
-              let bgColor = 'transparent';
-              let textColor = '#334155';
-              let borderColor = 'transparent';
-
-              if (currentMode === 'period') {
-                if (isPeriod) {
-                  bgColor = themeColors.primary;
-                  textColor = '#fff';
-                } else if (isOvulation) {
-                  bgColor = '#f59e0b';
-                  textColor = '#fff';
-                } else if (isFertile) {
-                  bgColor = '#fef3c7';
-                  textColor = '#b45309';
-                  borderColor = '#fde68a';
-                }
-              }
-
-              return (
-                <View 
-                  key={i} 
-                  className="w-10 h-10 items-center justify-center rounded-full border"
-                  style={{ backgroundColor: bgColor, borderColor: borderColor !== 'transparent' ? borderColor : bgColor }}
-                >
-                  <Text style={{ color: textColor }} className="font-bold">{day}</Text>
-                </View>
-              );
-            })}
+        {/* Upcoming Events */}
+        <View style={[styles.eventsCard, { backgroundColor: themeColors.card }]}>
+          <Text style={styles.legendTitle}>Upcoming</Text>
+          <View style={styles.eventItem}>
+            <View style={[styles.eventDot, { backgroundColor: themeColors.primary }]} />
+            <View>
+              <Text style={styles.eventTitle}>Next Period</Text>
+              <Text style={styles.eventSub}>In 14 days</Text>
+            </View>
+          </View>
+          <View style={styles.eventItem}>
+            <View style={[styles.eventDot, { backgroundColor: '#f59e0b' }]} />
+            <View>
+              <Text style={styles.eventTitle}>Next Fertile Window</Text>
+              <Text style={styles.eventSub}>In 26 days</Text>
+            </View>
           </View>
         </View>
       </ScrollView>
     </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  container: { flex: 1 },
+  header: {
+    paddingHorizontal: 24, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)',
+  },
+  headerTitle: { fontSize: 20, fontWeight: '700', color: '#1e293b' },
+  monthNav: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  navBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: '#f1f5f9', alignItems: 'center', justifyContent: 'center' },
+  navBtnText: { fontSize: 22, color: '#64748b', fontWeight: '600' },
+  monthLabel: { fontSize: 18, fontWeight: '700', color: '#334155' },
+  calendarCard: {
+    borderRadius: 20, padding: 16,
+    borderWidth: 1, borderColor: 'rgba(0,0,0,0.04)',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.04, shadowRadius: 16,
+  },
+  weekdayRow: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 12 },
+  weekdayText: { width: 36, textAlign: 'center', fontSize: 13, fontWeight: '700', color: '#94a3b8' },
+  dayGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-start' },
+  dayCell: {
+    width: '14.28%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center',
+    borderRadius: 20, marginBottom: 4,
+  },
+  dayText: { fontSize: 14, fontWeight: '700' },
+  legendCard: {
+    borderRadius: 20, padding: 16, marginTop: 16,
+    borderWidth: 1, borderColor: 'rgba(0,0,0,0.04)',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.04, shadowRadius: 16,
+  },
+  legendTitle: { fontSize: 12, fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 },
+  legendRow: { flexDirection: 'row', gap: 24 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendDot: { width: 12, height: 12, borderRadius: 6 },
+  legendText: { fontSize: 13, color: '#64748b', fontWeight: '500' },
+  eventsCard: {
+    borderRadius: 20, padding: 16, marginTop: 16,
+    borderWidth: 1, borderColor: 'rgba(0,0,0,0.04)',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.04, shadowRadius: 16,
+  },
+  eventItem: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8 },
+  eventDot: { width: 10, height: 10, borderRadius: 5 },
+  eventTitle: { fontSize: 14, fontWeight: '600', color: '#334155' },
+  eventSub: { fontSize: 12, color: '#94a3b8' },
+});
