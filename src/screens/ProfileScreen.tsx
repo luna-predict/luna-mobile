@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, SafeAreaView, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, SafeAreaView, ScrollView, TouchableOpacity, StyleSheet, Alert } from 'react-native';
 import { useMode, AppMode } from '../context/ModeContext';
 
 const modes: { id: AppMode; label: string; emoji: string; desc: string; color: string }[] = [
@@ -11,6 +11,7 @@ const modes: { id: AppMode; label: string; emoji: string; desc: string; color: s
 
 export default function ProfileScreen() {
   const { currentMode, setMode, themeColors } = useMode();
+  const [isMainnet, setIsMainnet] = useState(false);
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: themeColors.background }]}>
@@ -34,15 +35,22 @@ export default function ProfileScreen() {
         {/* WDK Wallet */}
         <View style={styles.walletCard}>
           <View>
-            <Text style={styles.walletLabel}>Compute Wallet (WDK)</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <Text style={styles.walletLabel}>Compute Wallet (WDK)</Text>
+              <View style={[styles.networkBadge, { backgroundColor: isMainnet ? '#ecfdf5' : '#fef3c7' }]}>
+                <Text style={{ fontSize: 9, fontWeight: '800', color: isMainnet ? '#059669' : '#b45309' }}>
+                  {isMainnet ? 'MAINNET' : 'TESTNET'}
+                </Text>
+              </View>
+            </View>
             <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 4 }}>
               <Text style={styles.walletBalance}>5.00</Text>
               <Text style={styles.walletCurrency}>USDt</Text>
             </View>
           </View>
-          <View style={styles.walletIcon}>
-            <Text style={{ fontSize: 28 }}>💰</Text>
-          </View>
+          <TouchableOpacity onPress={() => setIsMainnet(!isMainnet)} style={styles.walletIcon}>
+            <Text style={{ fontSize: 24 }}>🔁</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Mode Switcher */}
@@ -80,8 +88,15 @@ export default function ProfileScreen() {
         {/* Settings */}
         <Text style={[styles.sectionLabel, { marginTop: 24 }]}>Settings</Text>
         <View style={[styles.card, { backgroundColor: themeColors.card }]}>
+          <TouchableOpacity 
+            style={styles.settingsRow}
+            onPress={() => Alert.alert('Pair Desktop', 'Scan the QR code on your Luna Node desktop app to pair via Holepunch P2P for Tier 2 local delegation.')}
+          >
+            <Text style={styles.settingsText}>💻 Pair Desktop (Tier 2 Node)</Text>
+            <Text style={styles.settingsArrow}>›</Text>
+          </TouchableOpacity>
           {['Notifications', 'Export Data', 'About LunaPredict'].map((item, i) => (
-            <TouchableOpacity key={item} style={[styles.settingsRow, i > 0 && styles.settingsBorder]}>
+            <TouchableOpacity key={item} style={[styles.settingsRow, styles.settingsBorder]}>
               <Text style={styles.settingsText}>{item}</Text>
               <Text style={styles.settingsArrow}>›</Text>
             </TouchableOpacity>
@@ -121,7 +136,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     shadowColor: '#000', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.2, shadowRadius: 16,
   },
-  walletLabel: { fontSize: 11, color: '#94a3b8', fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 },
+  networkBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 8, marginLeft: 4 },
+  walletLabel: { fontSize: 11, color: '#94a3b8', fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1 },
   walletBalance: { fontSize: 32, fontWeight: '800', color: '#34d399' },
   walletCurrency: { fontSize: 14, fontWeight: '700', color: 'rgba(52,211,153,0.7)', marginBottom: 4 },
   walletIcon: { width: 48, height: 48, borderRadius: 24, backgroundColor: 'rgba(52,211,153,0.15)', alignItems: 'center', justifyContent: 'center' },

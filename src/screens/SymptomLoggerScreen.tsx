@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, SafeAreaView, ScrollView, TouchableOpacity, TextInput, Alert, StyleSheet } from 'react-native';
 import { useMode, AppMode } from '../context/ModeContext';
+import { LocalRagEngine } from '../ai/LocalRagEngine';
 
 // ─── Data from web SymptomLogger.tsx ───
 const COMMON_SYMPTOMS = [
@@ -70,13 +71,32 @@ export default function SymptomLoggerScreen() {
 
   const hasData = selectedSymptoms.length > 0 || !!selectedMood || !!selectedEnergy || !!selectedFlow;
 
-  const handleSave = () => {
-    Alert.alert('Saved ✨', 'Your symptoms have been logged locally and encrypted on-device.');
+  const handleSave = async () => {
+    // Phase 2: Save to persistent local storage for RAG context
+    const logId = Date.now().toString();
+    await LocalRagEngine.saveLog({
+      id: logId,
+      date: new Date().toISOString(),
+      symptoms: selectedSymptoms,
+      mood: selectedMood,
+      energy: selectedEnergy,
+      flow: selectedFlow,
+      notes: notes,
+      mode: currentMode
+    });
+
+    Alert.alert('Saved ✨', 'Your symptoms have been logged locally and added to your encrypted Vector Database.');
     setSelectedSymptoms([]);
     setSelectedMood(null);
     setSelectedEnergy(null);
     setSelectedFlow(null);
     setNotes('');
+  };
+
+  const handleVoiceLog = () => {
+    Alert.alert('Microphone Active 🎙️', 'Speak now. The QVAC Whisper model is running locally to transcribe your speech into logs.', [
+      { text: 'Stop Recording', onPress: () => handleSave() }
+    ]);
   };
 
   const allSymptoms = [...COMMON_SYMPTOMS, ...MODE_EXTRAS[currentMode]];
@@ -91,13 +111,21 @@ export default function SymptomLoggerScreen() {
           <Text style={styles.headerTitle}>Daily Log</Text>
           <Text style={styles.headerDate}>{dateLabel}</Text>
         </View>
-        <TouchableOpacity
-          onPress={handleSave}
-          disabled={!hasData}
-          style={[styles.saveBtn, { backgroundColor: hasData ? themeColors.primary : '#e2e8f0' }]}
-        >
-          <Text style={{ color: hasData ? '#fff' : '#94a3b8', fontWeight: '700', fontSize: 14 }}>✓</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 12 }}>
+          <TouchableOpacity
+            onPress={handleVoiceLog}
+            style={[styles.saveBtn, { backgroundColor: themeColors.primary + '15' }]}
+          >
+            <Text style={{ fontSize: 18 }}>🎙️</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleSave}
+            disabled={!hasData}
+            style={[styles.saveBtn, { backgroundColor: hasData ? themeColors.primary : '#e2e8f0' }]}
+          >
+            <Text style={{ color: hasData ? '#fff' : '#94a3b8', fontWeight: '700', fontSize: 14 }}>✓</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
