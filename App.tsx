@@ -1,21 +1,23 @@
 import React, { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import HomeScreen from './src/screens/HomeScreen';
+import { ModeProvider } from './src/context/ModeContext';
+import AppNavigator from './src/navigation/AppNavigator';
 import { WdkManager } from './src/wallet/WdkManager';
 
 const wdkManager = new WdkManager();
 
 export default function App() {
   useEffect(() => {
-    // Initialize WDK on app start
     wdkManager.initializeWallet();
   }, []);
 
   return (
     <SafeAreaProvider>
-      <HomeScreen />
-      <StatusBar style="light" />
+      <ModeProvider>
+        <AppNavigator />
+        <StatusBar style="dark" />
+      </ModeProvider>
     </SafeAreaProvider>
   );
 }
