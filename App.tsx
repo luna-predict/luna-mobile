@@ -1,23 +1,16 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { ModeProvider } from './src/context/ModeContext';
+import { AppProvider } from './src/context/AppContext';
 import AppNavigator from './src/navigation/AppNavigator';
-import { WdkManager } from './src/wallet/WdkManager';
-
-const wdkManager = new WdkManager();
 
 export default function App() {
-  useEffect(() => {
-    wdkManager.initializeWallet();
-  }, []);
-
   return (
     <SafeAreaProvider>
-      <ModeProvider>
+      <AppProvider>
         <AppNavigator />
         <StatusBar style="dark" />
-      </ModeProvider>
+      </AppProvider>
     </SafeAreaProvider>
   );
 }
