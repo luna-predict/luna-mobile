@@ -1,72 +1,49 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Store } from '../storage/Store';
+import { SymptomLog } from '../types';
 
-const LOGS_STORAGE_KEY = '@lunapredict_symptom_logs';
-
-export interface SymptomLog {
-  id: string;
-  date: string;
-  symptoms: string[];
-  mood: string | null;
-  energy: string | null;
-  flow: string | null;
-  notes: string;
-  mode: string;
-}
-
+/**
+ * Local RAG over the on-device log store.
+ * Production: QVAC embeddings + a local vector index (SQLite/WatermelonDB);
+ * here retrieval is recency + keyword scored, which behaves similarly for
+ * short personal-log corpora.
+ */
 export class LocalRagEngine {
-  /**
-   * Saves a daily log to the local secure storage.
-   * In a production environment, this would also generate an embedding via QVAC
-   * and store it in a Vector DB like WatermelonDB + SQLite.
-   */
-  static async saveLog(log: SymptomLog): Promise<void> {
-    try {
-      console.log(`[RAG] Saving log to local storage for future inference context...`);
-      const existingLogsStr = await AsyncStorage.getItem(LOGS_STORAGE_KEY);
-      const existingLogs: SymptomLog[] = existingLogsStr ? JSON.parse(existingLogsStr) : [];
-      
-      existingLogs.push(log);
-      await AsyncStorage.setItem(LOGS_STORAGE_KEY, JSON.stringify(existingLogs));
-      console.log(`[RAG] Successfully saved log ${log.id}`);
-    } catch (e) {
-      console.error('[RAG] Failed to save log', e);
-    }
+  /** Retrieve the logs most relevant to the query for prompt context. */
+  static async retrieveRelevantLogs(query: string, limit = 5): Promise<SymptomLog[]> {
+    console.log(`[RAG] Scoring local logs against query: "${query.slice(0, 60)}"`);
+    const logs = await Store.getLogs();
+    if (logs.length === 0) return [];
+
+    const terms = query.toLowerCase().split(/\W+/).filter(w => w.length > 3);
+    const now = Date.now();
+
+    const scored = logs.map(log => {
+      const haystack = [
+        ...log.symptoms, log.mood ?? '', log.energy ?? '', log.flow ?? '', log.notes,
+      ].join(' ').toLowerCase();
+      const keywordHits = terms.filter(t => haystack.includes(t)).length;
+      const ageDays = Math.max(0, (now - new Date(log.date).getTime()) / 86400000);
+      const recency = Math.max(0, 1 - ageDays / 60); // decays over ~2 months
+      return { log, score: keywordHits * 2 + recency };
+    });
+
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(s => s.log)
+      .sort((a, b) => a.date.localeCompare(b.date));
   }
 
-  /**
-   * Retrieves relevant logs from local storage.
-   * Phase 2 implementation simulates retrieving the last 3 days of logs to build context.
-   */
-  static async retrieveRelevantLogs(query: string): Promise<string> {
-    console.log(`[RAG] Generating embedding for query: "${query}"`);
-    console.log(`[RAG] Searching local AsyncStorage vector database...`);
-    
-    // Simulate vector search latency
-    await new Promise(resolve => setTimeout(resolve, 600));
-
-    try {
-      const existingLogsStr = await AsyncStorage.getItem(LOGS_STORAGE_KEY);
-      const existingLogs: SymptomLog[] = existingLogsStr ? JSON.parse(existingLogsStr) : [];
-      
-      if (existingLogs.length === 0) {
-         return "[LOCAL RAG CONTEXT - User has no past logs recorded.]\n";
-      }
-
-      // Grab the 3 most recent logs
-      const recentLogs = existingLogs.slice(-3).reverse();
-      
-      let contextStr = "[LOCAL RAG CONTEXT - DO NOT EXPOSE TO NETWORK]\nUser's Recent Cycle Logs:\n";
-      recentLogs.forEach(log => {
-        const d = new Date(log.date).toLocaleDateString();
-        contextStr += `- ${d}: Mode=${log.mode}, Symptoms=[${log.symptoms.join(',')}], Mood=${log.mood}, Energy=${log.energy}, Flow=${log.flow}. Notes: "${log.notes}"\n`;
-      });
-      contextStr += "[END CONTEXT]\n";
-
-      console.log(`[RAG] Found ${recentLogs.length} relevant logs. Injecting into prompt.`);
-      return contextStr;
-    } catch (e) {
-      console.error('[RAG] Failed to retrieve logs', e);
-      return "[LOCAL RAG CONTEXT - Error retrieving logs]\n";
+  /** Format retrieved logs as a prompt context block. Never leaves the device on Tier 3. */
+  static formatContext(logs: SymptomLog[]): string {
+    if (logs.length === 0) {
+      return '[LOCAL RAG CONTEXT — user has no past logs recorded]\n';
     }
+    let out = '[LOCAL RAG CONTEXT — DO NOT EXPOSE TO NETWORK]\nRelevant cycle logs:\n';
+    for (const log of logs) {
+      const d = new Date(log.date).toLocaleDateString();
+      out += `- ${d}: mode=${log.mode}, symptoms=[${log.symptoms.join(',')}], mood=${log.mood}, energy=${log.energy}, flow=${log.flow}${log.notes ? `, notes="${log.notes}"` : ''}\n`;
+    }
+    return out + '[END CONTEXT]\n';
   }
 }

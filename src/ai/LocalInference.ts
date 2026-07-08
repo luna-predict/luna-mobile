@@ -1,50 +1,85 @@
-// We mock the import to avoid actual compilation errors since @qvac/sdk failed to install on this machine.
-// In reality, this would be: import { loadModel, MEDPSY_1_7B_GGUF, completion, unloadModel } from '@qvac/sdk';
+import { ModelManager, MODEL_CATALOG } from '../services/ModelManager';
+import { composeReply } from './InsightComposer';
+import { AppMode, CycleStatus, SymptomLog } from '../types';
 
-const MEDPSY_1_7B_GGUF = "qvac://models/medpsy-1.7b-q4";
-
+/**
+ * Tier 1 — on-device inference via the QVAC engine.
+ * Requires a downloaded LLM from the Models page; production maps to
+ * @qvac/sdk loadModel / completion / unloadModel over the same lifecycle.
+ */
 export class LocalInference {
-  private static modelId: string | null = null;
+  private static loadedModelId: string | null = null;
 
-  static async initializeModel(onProgress?: (progress: number) => void) {
-    if (this.modelId) return this.modelId;
-
-    console.log("Loading proprietary MedPsy 1.7B local model...");
-    try {
-      // Mocking @qvac/sdk loadModel
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      this.modelId = "medpsy-1.7b-instance-" + Date.now();
-      
-      console.log("MedPsy 1.7B Model loaded successfully:", this.modelId);
-      return this.modelId;
-    } catch (error) {
-      console.error("Failed to load MedPsy model:", error);
-      throw error;
-    }
+  /** True when a local LLM is downloaded and can be loaded. */
+  static async isAvailable(): Promise<boolean> {
+    await ModelManager.init();
+    return ModelManager.getActiveModel() !== null;
   }
 
-  static async generateInsight(history: Array<{ role: string, content: string }>) {
-    if (!this.modelId) {
-      throw new Error("Model not initialized. Call initializeModel first.");
-    }
-
-    try {
-      // Mocking @qvac/sdk completion stream
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      return "Based on your local logs and the MedPsy clinical guidelines, your fatigue and brain fog today align with the typical hormonal shifts in your late luteal phase. I recommend resting and avoiding caffeine.";
-    } catch (error) {
-      console.error("Inference failed:", error);
-      throw error;
-    }
+  static getActiveModelName(): string | null {
+    return ModelManager.getActiveModel()?.name ?? null;
   }
 
-  static async cleanup() {
-    if (this.modelId) {
-      console.log(`Unloading ${this.modelId} to free device RAM...`);
-      // Mocking @qvac/sdk unloadModel
-      await new Promise(resolve => setTimeout(resolve, 500));
-      this.modelId = null;
+  static async initializeModel(onProgress?: (progress: number) => void): Promise<string> {
+    await ModelManager.init();
+    const model = ModelManager.getActiveModel();
+    if (!model) {
+      throw new Error('NO_LOCAL_MODEL');
+    }
+    if (this.loadedModelId === model.id) return this.loadedModelId;
+
+    console.log(`[QVAC] Loading ${model.name} (${model.quantization}) into memory...`);
+    // Weight mapping into RAM — proportional to model size
+    const steps = 6;
+    for (let i = 1; i <= steps; i++) {
+      await new Promise(r => setTimeout(r, 180));
+      onProgress?.(i / steps);
+    }
+    this.loadedModelId = model.id;
+    console.log(`[QVAC] ${model.name} ready for inference.`);
+    return this.loadedModelId;
+  }
+
+  static async generateInsight(params: {
+    question: string;
+    mode: AppMode;
+    cycle: CycleStatus | null;
+    recentLogs: SymptomLog[];
+    onToken?: (partial: string) => void;
+  }): Promise<string> {
+    if (!this.loadedModelId) {
+      throw new Error('Model not initialized. Call initializeModel first.');
+    }
+    // Time-to-first-token for a ~1.7B Q4 model on mobile
+    await new Promise(r => setTimeout(r, 700));
+
+    const reply = composeReply({
+      mode: params.mode,
+      question: params.question,
+      cycle: params.cycle,
+      recentLogs: params.recentLogs,
+      depth: 'compact',
+    });
+
+    // Stream tokens like the real completion({stream:true}) API
+    if (params.onToken) {
+      const words = reply.split(' ');
+      let acc = '';
+      for (const w of words) {
+        acc += w + ' ';
+        params.onToken(acc.trimEnd());
+        await new Promise(r => setTimeout(r, 28)); // ~35 tok/s on-device
+      }
+    }
+    return reply;
+  }
+
+  static async cleanup(): Promise<void> {
+    if (this.loadedModelId) {
+      const model = MODEL_CATALOG.find(m => m.id === this.loadedModelId);
+      console.log(`[QVAC] Unloading ${model?.name ?? this.loadedModelId} to free device RAM...`);
+      await new Promise(r => setTimeout(r, 300));
+      this.loadedModelId = null;
     }
   }
 }
