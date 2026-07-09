@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, SafeAreaView, ScrollView, TextInput, Alert, StyleSheet } from 'react-native';
+import { View, Text, ScrollView, TextInput, Alert, StyleSheet } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { useApp } from '../../context/AppContext';
 import { Store } from '../../storage/Store';

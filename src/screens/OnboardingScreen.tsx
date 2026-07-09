@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, SafeAreaView, ScrollView,
+  View, Text, TextInput, TouchableOpacity, ScrollView,
   StyleSheet, Animated, KeyboardAvoidingView, Platform, Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useApp } from '../context/AppContext';
 import { AppMode, Sex, UserProfile } from '../types';
 import { toISODay } from '../services/CycleEngine';

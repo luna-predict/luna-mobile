@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useMemo } from 'react';
-import { View, Text, ScrollView, SafeAreaView, Animated, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, ScrollView, Animated, StyleSheet, TouchableOpacity } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
 import { useNavigation, NavigationProp } from '@react-navigation/native';
 import { useApp } from '../context/AppContext';

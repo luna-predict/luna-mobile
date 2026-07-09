@@ -3,6 +3,7 @@ import { View, Text, ActivityIndicator } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { NavigationContainer } from '@react-navigation/native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useApp } from '../context/AppContext';
 import {
   Home, Calendar as CalendarIcon, PlusCircle, User, MessageCircle, HeartHandshake, ClipboardCheck,
@@ -32,8 +33,9 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function WomenTabs() {
   const { themeColors } = useApp();
+  const insets = useSafeAreaInsets();
   return (
-    <Tab.Navigator screenOptions={tabScreenOptions(themeColors.primary, themeColors.card)}>
+    <Tab.Navigator screenOptions={tabScreenOptions(themeColors.primary, themeColors.card, insets.bottom)}>
       <Tab.Screen name="Dashboard" component={DashboardScreen}
         options={{ tabBarIcon: ({ color, size }) => <Home color={color} size={size} /> }} />
       <Tab.Screen name="Calendar" component={CalendarScreen}
@@ -53,8 +55,9 @@ function WomenTabs() {
 
 function MenTabs() {
   const { themeColors } = useApp();
+  const insets = useSafeAreaInsets();
   return (
-    <Tab.Navigator screenOptions={tabScreenOptions(themeColors.primary, themeColors.card)}>
+    <Tab.Navigator screenOptions={tabScreenOptions(themeColors.primary, themeColors.card, insets.bottom)}>
       <Tab.Screen name="Partner" component={PartnerDashboardScreen}
         options={{ tabBarIcon: ({ color, size }) => <HeartHandshake color={color} size={size} /> }} />
       <Tab.Screen name="Check-In" component={MenCheckInScreen}
@@ -67,7 +70,7 @@ function MenTabs() {
   );
 }
 
-function tabScreenOptions(active: string, card: string) {
+function tabScreenOptions(active: string, card: string, bottomInset: number) {
   return {
     headerShown: false,
     tabBarActiveTintColor: active,
@@ -78,8 +81,8 @@ function tabScreenOptions(active: string, card: string) {
       elevation: 10,
       shadowOpacity: 0.1,
       shadowRadius: 20,
-      height: 60,
-      paddingBottom: 8,
+      height: 60 + bottomInset,
+      paddingBottom: 8 + bottomInset,
       paddingTop: 8,
     },
   };
