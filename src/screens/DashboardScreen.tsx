@@ -1,316 +1,297 @@
-import React, { useEffect, useRef, useMemo } from 'react';
-import { View, Text, ScrollView, Animated, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, ScrollView, Animated, StyleSheet, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
+import Svg, { Circle } from 'react-native-svg';
 import { useNavigation, NavigationProp } from '@react-navigation/native';
+import {
+  Droplet, Sparkles, CalendarClock, Baby, Flame, Activity, MessageCircle, Lock, PenLine, ChevronRight, Moon,
+} from 'lucide-react-native';
 import { useApp } from '../context/AppContext';
-import { AppMode, CyclePhase } from '../types';
-import { phaseInsight, parseISODay } from '../services/CycleEngine';
-import { Droplet, Sparkles } from 'lucide-react-native';
-import { Card, SectionLabel, Badge } from '../ui';
+import { CyclePhase } from '../types';
+import { phaseInsight, formatDay, fertilityLevel } from '../domain';
+import { Card, SectionLabel, Badge, Banner, FlagBanner, StatTile, Button, useReducedMotion, space, type } from '../ui';
+import { RootStackParamList } from '../navigation/AppNavigator';
+import { coachEngine } from '../ai/engine';
+import { ModelManager } from '../services/ModelManager';
+import { useModelRegistryVersion } from '../ai/useModels';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
-const PHASE_CONFIG: Record<CyclePhase, { emoji: string }> = {
-  menstrual: { emoji: '🌸' },
-  follicular: { emoji: '🌱' },
-  ovulatory: { emoji: '✨' },
-  luteal: { emoji: '🌙' },
+const PHASE_ICON: Record<CyclePhase, React.ComponentType<{ color?: string; size?: number }>> = {
+  menstrual: Droplet,
+  follicular: Sparkles,
+  ovulatory: Sparkles,
+  luteal: Moon,
 };
 
-const MODE_TIPS: Record<AppMode, string[]> = {
-  period: [
-    'Track your flow to spot patterns',
-    'Rest is productive during menstruation',
-    'Magnesium may help with cramps',
-  ],
-  conceive: [
-    'Log BBT before getting out of bed',
-    'Egg white discharge signals peak fertility',
-    'Intercourse every 1–2 days across the fertile window',
-  ],
-  pregnancy: [
-    'Stay hydrated for you and baby',
-    'Prenatal vitamins are essential',
-    'Count kicks daily after week 28',
-  ],
-  perimenopause: [
-    'Irregular cycles are normal during this phase',
-    'Track hot flashes to find triggers',
-    'Sleep hygiene can improve rest quality',
-  ],
+const MOOD_LABEL: Record<string, string> = {
+  great: 'Great', good: 'Good', okay: 'Okay', down: 'Down', stressed: 'Stressed', irritable: 'Irritable',
 };
 
-const MODE_ICONS: Record<AppMode, string> = {
-  period: '🌸', conceive: '🥚', pregnancy: '🤰', perimenopause: '🌿',
-};
-
-const MOOD_EMOJI: Record<string, string> = {
-  great: '😊', good: '🙂', okay: '😐', down: '😔', stressed: '😰', irritable: '😤',
-};
+type Nav = NavigationProp<RootStackParamList & { Log: undefined; Coach: undefined; Calendar: undefined }>;
 
 export default function DashboardScreen() {
-  const navigation = useNavigation<NavigationProp<{ Log: undefined; Coach: undefined }>>();
-  const { currentMode, themeColors, user, cycle, pregnancy, logs } = useApp();
+  const navigation = useNavigation<Nav>();
+  const { themeColors: t, currentMode, user, cycle, pregnancy, peri, logs, flags, dismissFlag, today, getLog } = useApp();
+  const reducedMotion = useReducedMotion();
+  const [hideLatePrompt, setHideLatePrompt] = useState(false);
 
-  const isPregnancy = currentMode === 'pregnancy' && pregnancy;
-  const ringValue = isPregnancy ? pregnancy.week : cycle?.cycleDay ?? 1;
-  const ringMax = isPregnancy ? 40 : cycle?.cycleLength ?? 28;
-  const phase = !isPregnancy && cycle ? cycle.phase : null;
+  // Ring value
+  const ring = useMemo(() => {
+    if (pregnancy) return { value: pregnancy.week, max: 40, label: 'Week', sub: pregnancy.label };
+    if (peri) return { value: Math.min(peri.daysSinceLastBleed ?? 0, 365), max: 365, label: 'Days since period', sub: peri.stageLabel };
+    if (cycle) return { value: cycle.cycleDay, max: Math.max(cycle.cycleLength, cycle.cycleDay), label: 'Day', sub: `of ~${cycle.cycleLength}` };
+    return { value: 0, max: 28, label: 'Day', sub: '—' };
+  }, [pregnancy, peri, cycle]);
 
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const progressAnim = useRef(new Animated.Value(0)).current;
-  const fadeAnim = useRef(new Animated.Value(0)).current;
-
+  const progress = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    progressAnim.setValue(0);
-    fadeAnim.setValue(0);
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.03, duration: 2000, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 2000, useNativeDriver: true }),
-      ])
-    ).start();
-    Animated.timing(progressAnim, { toValue: ringValue / ringMax, duration: 1500, useNativeDriver: true }).start();
-    Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }).start();
-  }, [currentMode, ringValue, ringMax]);
+    const target = ring.max ? ring.value / ring.max : 0;
+    if (reducedMotion) progress.setValue(target);
+    else Animated.timing(progress, { toValue: target, duration: 800, useNativeDriver: true }).start();
+  }, [ring.value, ring.max, reducedMotion, progress]);
 
-  const radius = 90;
+  const radius = 86;
   const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = progressAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [circumference, 0],
-  });
+  const dashOffset = progress.interpolate({ inputRange: [0, 1], outputRange: [circumference, 0] });
 
-  const tips = MODE_TIPS[currentMode];
-  const tipIndex = Math.floor(Date.now() / 86400000) % tips.length;
+  const todayLog = getLog(today, currentMode);
+  const recentLogs = useMemo(() => [...logs].filter(l => l.mode === currentMode).sort((a, b) => b.day.localeCompare(a.day)).slice(0, 3), [logs, currentMode]);
+  const urgentFlags = flags.filter(f => f.severity === 'urgent');
+  const otherFlags = flags.filter(f => f.severity !== 'urgent');
 
-  const recentLogs = useMemo(() => [...logs].slice(-3).reverse(), [logs]);
-  const todayLogged = logs.some(l => l.date.slice(0, 10) === new Date().toISOString().slice(0, 10) ||
-    l.date.slice(0, 10) === `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`);
+  const hour = new Date().getHours();
+  const greeting = `${hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'}${user?.name ? `, ${user.name}` : ''}`;
 
-  const greeting = (() => {
-    const h = new Date().getHours();
-    const name = user?.name ? `, ${user.name}` : '';
-    return h < 12 ? `Good morning${name}` : h < 18 ? `Good afternoon${name}` : `Good evening${name}`;
-  })();
+  useModelRegistryVersion();
+  const engineKind = coachEngine.kind();
+  const coachModel = ModelManager.getActiveModel();
+  const coachStatus = engineKind === 'demo'
+    ? 'Demo mode — install the LunaPredict build for on-device AI'
+    : coachModel ? `${coachModel.name} ready · works offline` : 'Download MedPsy once to chat offline';
+
+  const PhaseIcon = cycle ? PHASE_ICON[cycle.phase] : Moon;
+  const isLate = cycle && (cycle.status === 'late' || cycle.status === 'overdue_long');
+  const level = cycle && currentMode === 'conceive' ? fertilityLevel(cycle, today) : null;
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: themeColors.background }]}>
-      <Animated.View style={{ flex: 1, opacity: fadeAnim }}>
-        <ScrollView contentContainerStyle={{ paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
-          {/* Header */}
-          <View style={styles.header}>
-            <View>
-              <Text style={styles.headerTitle}>
-                Luna<Text style={{ color: themeColors.primary }}>Predict</Text>
-              </Text>
-              <Text style={styles.greeting}>{greeting}</Text>
-            </View>
-            <View style={[styles.privacyPill, { backgroundColor: '#ecfdf5' }]}>
-              <Text style={{ fontSize: 10, fontWeight: '800', color: '#059669' }}>🔒 ON-DEVICE</Text>
-            </View>
-          </View>
-
-          {/* Hero ring */}
-          <View style={[styles.ringCard, { backgroundColor: themeColors.card, shadowColor: themeColors.primary }]}>
-            <View style={styles.dateRow}>
-              <View>
-                <Text style={styles.todayText}>Today</Text>
-                <Text style={styles.dateText}>
-                  {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-                </Text>
-              </View>
-              <View style={[styles.phaseBadge, { backgroundColor: themeColors.primary + '20' }]}>
-                <Text style={[styles.phaseBadgeText, { color: themeColors.primary }]}>
-                  {isPregnancy
-                    ? `🤰 Trimester ${pregnancy.trimester}`
-                    : phase ? `${PHASE_CONFIG[phase].emoji} ${cycle!.phaseLabel}` : '—'}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.ringContainer}>
-              <Animated.View style={{ transform: [{ scale: pulseAnim }], alignItems: 'center', justifyContent: 'center' }}>
-                <View style={[styles.glowCircle, { backgroundColor: themeColors.primary + '10', shadowColor: themeColors.primary }]} />
-                <Svg width={240} height={240} viewBox="0 0 240 240">
-                  <Defs>
-                    <LinearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <Stop offset="0%" stopColor={themeColors.primary} />
-                      <Stop offset="100%" stopColor={themeColors.primary} stopOpacity={0.5} />
-                    </LinearGradient>
-                  </Defs>
-                  <Circle cx={120} cy={120} r={radius} stroke="rgba(14,14,17,0.05)" strokeWidth={12} fill="transparent" />
-                  <AnimatedCircle
-                    cx={120} cy={120} r={radius}
-                    stroke="url(#grad)" strokeWidth={14} fill="transparent"
-                    strokeLinecap="round"
-                    strokeDasharray={circumference}
-                    strokeDashoffset={strokeDashoffset}
-                    rotation={-90} origin="120, 120"
-                  />
-                </Svg>
-                <View style={styles.ringCenter}>
-                  <Text style={styles.ringLabel}>{isPregnancy ? 'Week' : 'Day'}</Text>
-                  <Text style={[styles.ringValue, { color: themeColors.primary }]}>{ringValue}</Text>
-                  <Text style={styles.ringSubLabel}>of {ringMax} {isPregnancy ? 'weeks' : 'days'}</Text>
-                </View>
-              </Animated.View>
-            </View>
-
-            <Text style={styles.phaseDesc}>
-              {isPregnancy
-                ? `Baby is about the size of ${pregnancy.babySize}`
-                : phase ? phaseInsight(phase) : 'Log your first period to start predictions'}
+    <SafeAreaView edges={['top']} style={[styles.container, { backgroundColor: t.background }]}>
+      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: space.xxl }} showsVerticalScrollIndicator={false}>
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={{ flex: 1 }}>
+            <Text accessibilityRole="header" style={[styles.brand, { color: t.text }]}>
+              Luna<Text style={{ color: t.primaryStrong }}>Predict</Text>
             </Text>
-            {cycle && cycle.confidence !== 'established' && !isPregnancy && (
-              <Text style={styles.confidenceNote}>
-                {cycle.confidence === 'seed'
-                  ? 'Predictions from onboarding — they sharpen as you log'
-                  : 'Luna is learning your cycle from your logs'}
-              </Text>
-            )}
+            <Text style={{ color: t.textMuted, fontSize: 15 }}>{greeting}</Text>
+          </View>
+          <Badge label="Private · on this phone" color={t.success} bg={t.successTint} icon={Lock} />
+        </View>
+
+        {urgentFlags.map(f => <FlagBanner key={f.id} flag={f} />)}
+
+        {/* Late / assumed prompts */}
+        {isLate && !hideLatePrompt && (
+          <Banner
+            testID="banner-late"
+            severity="warn"
+            title={`Period ${cycle!.daysLate} day${cycle!.daysLate === 1 ? '' : 's'} late`}
+            body={currentMode === 'conceive'
+              ? 'A pregnancy test is reliable from today. If your period has started, log it so predictions stay accurate.'
+              : 'Has your period started? Logging it keeps predictions accurate. If there is a chance you are pregnant, a test is reliable now.'}
+            actions={[
+              { label: 'It started', testID: 'late-started', onPress: () => navigation.navigate('LogDay', { day: today, periodStart: true }) },
+              { label: 'Not yet', onPress: () => setHideLatePrompt(true) },
+            ]}
+          />
+        )}
+        {cycle?.status === 'assumed' && !hideLatePrompt && cycle.lastPeriodStart && (
+          <Banner
+            severity="info"
+            title={`Has your period started since ${formatDay(cycle.lastPeriodStart)}?`}
+            body="Luna is assuming regular cycles until you log one. Logging real periods makes predictions personal."
+            actions={[
+              { label: 'Log a period', onPress: () => navigation.navigate('Calendar') },
+              { label: 'Later', onPress: () => setHideLatePrompt(true) },
+            ]}
+          />
+        )}
+
+        {/* Hero */}
+        <Card style={styles.hero}>
+          <View style={styles.heroTop}>
+            <View>
+              <Text style={{ ...type.caption, color: t.textMuted }}>TODAY</Text>
+              <Text style={{ ...type.heading, color: t.text }}>{formatDay(today, { weekday: 'long', month: 'long', day: 'numeric' })}</Text>
+            </View>
+            {pregnancy ? <Badge label={`Trimester ${pregnancy.trimester}`} color={t.primaryStrong} bg={t.tint} icon={Baby} />
+              : peri ? <Badge label={peri.stageLabel} color={t.primaryStrong} bg={t.tint} />
+              : cycle ? <Badge label={cycle.phaseLabel} color={isLate ? t.warning : t.primaryStrong} bg={isLate ? t.warningTint : t.tint} icon={PhaseIcon} />
+              : null}
           </View>
 
-          {/* Stats */}
-          <View style={styles.statsRow}>
-            {isPregnancy ? (
-              <>
-                <Card style={[styles.statCard, { marginBottom: 0 }]}>
-                  <Droplet color={themeColors.primary} size={24} />
-                  <View style={{ marginLeft: 12 }}>
-                    <Text style={[styles.statValue, { color: themeColors.primary }]}>{pregnancy.daysUntilDue}</Text>
-                    <Text style={styles.statLabel}>Days to due date</Text>
-                  </View>
-                </Card>
-                <Card style={[styles.statCard, { marginBottom: 0 }]}>
-                  <Sparkles color="#f59e0b" size={24} />
-                  <View style={{ marginLeft: 12 }}>
-                    <Text style={[styles.statValue, { color: '#f59e0b' }]}>
-                      {parseISODay(pregnancy.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    </Text>
-                    <Text style={styles.statLabel}>Due date</Text>
-                  </View>
-                </Card>
-              </>
-            ) : (
-              <>
-                <Card style={[styles.statCard, { marginBottom: 0 }]}>
-                  <Droplet color={themeColors.primary} size={24} />
-                  <View style={{ marginLeft: 12 }}>
-                    <Text style={[styles.statValue, { color: themeColors.primary }]}>{cycle?.daysUntilPeriod ?? '—'}</Text>
-                    <Text style={styles.statLabel}>Days to period</Text>
-                  </View>
-                </Card>
-                <Card style={[styles.statCard, { marginBottom: 0 }]}>
-                  <Sparkles color="#f59e0b" size={24} />
-                  <View style={{ marginLeft: 12 }}>
-                    <Text style={[styles.statValue, { color: '#f59e0b' }]}>
-                      {cycle?.inFertileWindow ? 'High' : `${cycle?.daysUntilOvulation ?? '—'}d`}
-                    </Text>
-                    <Text style={styles.statLabel}>{cycle?.inFertileWindow ? 'Fertility now' : 'To ovulation'}</Text>
-                  </View>
-                </Card>
-              </>
-            )}
+          <View style={styles.ringWrap} accessible accessibilityLabel={`${ring.label} ${ring.value}${ring.sub ? `, ${ring.sub}` : ''}`}>
+            <Svg width={210} height={210} viewBox="0 0 210 210">
+              <Circle cx={105} cy={105} r={radius} stroke={t.surface} strokeWidth={14} fill="transparent" />
+              <AnimatedCircle
+                cx={105} cy={105} r={radius} stroke={isLate ? t.warning : t.primary} strokeWidth={14} fill="transparent"
+                strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={dashOffset}
+                rotation={-90} origin="105, 105"
+              />
+            </Svg>
+            <View style={styles.ringCenter}>
+              <Text style={{ ...type.caption, color: t.textMuted }}>{ring.label.toUpperCase()}</Text>
+              <Text testID="dashboard-ring-value" style={{ fontSize: 52, fontWeight: '800', color: t.primaryStrong }}>{ring.value}</Text>
+              <Text style={{ fontSize: 14, color: t.textMuted }}>{ring.sub}</Text>
+            </View>
           </View>
 
-          {/* Insight */}
-          <Card style={{ marginHorizontal: 16, marginTop: 16, marginBottom: 0, borderLeftWidth: 4, borderLeftColor: themeColors.primary }}>
-            <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-              <View style={[styles.insightIcon, { backgroundColor: themeColors.primary + '15' }]}>
-                <Text style={{ fontSize: 20 }}>{MODE_ICONS[currentMode]}</Text>
-              </View>
-              <View style={{ flex: 1, marginLeft: 12 }}>
-                <Text style={styles.insightTitle}>Today's Insight</Text>
-                <Text style={styles.insightBody}>{tips[tipIndex]}</Text>
-              </View>
+          <Text style={[styles.heroLine, { color: t.text }]}>
+            {pregnancy ? `Baby is about the size of ${pregnancy.babySize}`
+              : peri ? (peri.daysSinceLastBleed != null ? `${peri.daysSinceLastBleed} days since your last period` : 'Log bleeding days to follow your transition')
+              : cycle && cycle.status !== 'no_data' ? (isLate ? 'Your period is late' : phaseInsight(cycle.phase))
+              : 'Log your first period to start predictions'}
+          </Text>
+          {cycle && !isLate && cycle.status !== 'no_data' && (
+            <Text style={[styles.heroSub, { color: t.textMuted }]}>
+              {cycle.confidence === 'seed' ? 'Based on your onboarding answers — sharpens as you log'
+                : cycle.confidence === 'irregular' ? `Your cycles vary a lot (${cycle.spread} days) — dates are wider ranges`
+                : cycle.confidence === 'learning' ? `Learning from ${cycle.cyclesTracked} logged cycle${cycle.cyclesTracked === 1 ? '' : 's'}`
+                : `Learned from your last ${cycle.cyclesTracked} cycles`}
+            </Text>
+          )}
+          {level && !isLate && (
+            <View style={{ alignItems: 'center', marginTop: space.md }}>
+              <Badge
+                label={level === 'peak' ? 'Peak fertility today' : level === 'high' ? 'High fertility today' : 'Low fertility today'}
+                color={level === 'low' ? t.textMuted : t.warning}
+                bg={level === 'low' ? t.surface : t.warningTint}
+              />
             </View>
-            <View style={styles.insightDivider} />
-            <TouchableOpacity onPress={() => navigation.navigate('Coach')}>
-              <Text style={styles.insightTip}>
-                💬 <Text style={{ fontWeight: '700', color: themeColors.primary }}>Ask Luna</Text> — your on-device AI coach
-              </Text>
-            </TouchableOpacity>
-          </Card>
+          )}
+        </Card>
 
-          {/* Recent logs */}
-          <Card style={{ marginHorizontal: 16, marginTop: 16, marginBottom: 0 }}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <SectionLabel style={{ marginBottom: 0 }}>Recent Logs</SectionLabel>
-              {todayLogged && <Badge label="TODAY LOGGED ✓" color="#059669" bg="#ecfdf5" />}
+        {/* Stats */}
+        <View style={styles.stats}>
+          {pregnancy ? (
+            <>
+              <StatTile icon={CalendarClock} value={`${pregnancy.daysUntilDue}`} label="Days to due date" />
+              <StatTile icon={Baby} value={formatDay(pregnancy.dueDate)} label="Due date" color={t.warning} />
+            </>
+          ) : peri ? (
+            <>
+              <StatTile icon={Activity} value={peri.spread != null ? `${peri.spread}d` : '—'} label="Cycle variation" sub="longest − shortest" />
+              <StatTile icon={Flame} value={peri.hotFlashAvg7 != null ? `${peri.hotFlashAvg7}` : '—'} label="Hot flashes / day" sub="last 7 days" color={t.warning} />
+            </>
+          ) : cycle && cycle.status !== 'no_data' ? (
+            <>
+              <StatTile
+                testID="stat-period"
+                icon={Droplet}
+                value={isLate ? `+${cycle.daysLate}d` : `${cycle.daysUntilPeriod}d`}
+                label={isLate ? 'Period late' : 'To next period'}
+                sub={isLate ? `expected ${formatDay(cycle.nextPeriodDate)}` : `likely ${formatDay(cycle.nextPeriodRange.start)}–${formatDay(cycle.nextPeriodRange.end)}`}
+                color={isLate ? t.warning : undefined}
+              />
+              <StatTile
+                icon={Sparkles}
+                value={cycle.inFertileWindow ? 'Now' : isLate ? '—' : `${cycle.daysUntilOvulation}d`}
+                label={cycle.inFertileWindow ? 'Fertile window' : 'To ovulation'}
+                sub={cycle.ovulationStatus === 'confirmed' ? 'confirmed by temperature' : cycle.ovulationStatus === 'likely' ? `likely (${cycle.ovulationSource === 'opk' ? 'ovulation test' : 'mucus'})` : 'estimate'}
+                color={t.warning}
+              />
+            </>
+          ) : null}
+        </View>
+        {(currentMode === 'conceive' || currentMode === 'period') && cycle && (
+          <Text style={[styles.disclaimer, { color: t.subtext }]}>Fertility estimates are for awareness only — LunaPredict is not a contraceptive.</Text>
+        )}
+
+        {otherFlags.map(f => <FlagBanner key={f.id} flag={f} onDismiss={() => dismissFlag(f.id)} />)}
+
+        {/* Coach */}
+        <Pressable
+          testID="dashboard-ask-luna"
+          onPress={() => navigation.navigate('Coach')}
+          accessibilityRole="button"
+          accessibilityLabel={`Ask Luna. ${coachStatus}`}
+          style={({ pressed }) => [{ opacity: pressed ? 0.85 : 1 }]}
+        >
+          <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+            <View style={[styles.iconCircle, { backgroundColor: t.tint }]}><MessageCircle color={t.primaryStrong} size={22} /></View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ ...type.heading, color: t.text }}>Ask Luna</Text>
+              <Text style={{ fontSize: 13, color: t.textMuted, marginTop: 2 }}>{coachStatus}</Text>
             </View>
-            {recentLogs.length === 0 ? (
-              <TouchableOpacity style={styles.emptyState} onPress={() => navigation.navigate('Log')}>
-                <Text style={{ fontSize: 32, marginBottom: 8 }}>📝</Text>
-                <Text style={styles.emptyText}>No logs yet</Text>
-                <Text style={styles.emptySubtext}>Tap the + tab to log symptoms — every log improves predictions</Text>
-              </TouchableOpacity>
-            ) : (
-              recentLogs.map((log, i) => (
-                <View key={log.id} style={[styles.logRow, i > 0 && styles.logRowBorder]}>
-                  <Text style={styles.logDate}>
-                    {parseISODay(log.date).toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' })}
-                  </Text>
-                  <Text style={{ fontSize: 16, width: 30 }}>{log.mood ? MOOD_EMOJI[log.mood] ?? '📝' : '📝'}</Text>
-                  <Text style={styles.logSummary} numberOfLines={1}>
-                    {[
-                      log.flow ? `${log.flow} flow` : null,
-                      log.symptoms.length > 0 ? `${log.symptoms.length} symptom${log.symptoms.length > 1 ? 's' : ''}` : null,
-                      log.energy ? `${log.energy} energy` : null,
-                    ].filter(Boolean).join(' · ') || 'Notes only'}
-                  </Text>
-                </View>
-              ))
-            )}
+            <ChevronRight color={t.subtext} size={20} />
           </Card>
-        </ScrollView>
-      </Animated.View>
+        </Pressable>
+
+        {/* Today's log */}
+        <SectionLabel style={{ marginTop: space.sm }}>Today</SectionLabel>
+        <Card>
+          {todayLog ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+              <View style={{ flex: 1 }}>
+                <Text style={{ ...type.label, color: t.success }}>Logged today</Text>
+                <Text style={{ color: t.textMuted, marginTop: 2 }} numberOfLines={2}>{summarize(todayLog)}</Text>
+              </View>
+              <Button label="Edit" variant="tonal" compact icon={PenLine} onPress={() => navigation.navigate('Log')} />
+            </View>
+          ) : (
+            <View style={{ gap: space.md }}>
+              <Text style={{ color: t.textMuted }}>How are you today? A 20-second log keeps predictions sharp.</Text>
+              <Button testID="dashboard-log-today" label="Log today" icon={PenLine} onPress={() => navigation.navigate('Log')} />
+            </View>
+          )}
+        </Card>
+
+        {recentLogs.filter(l => l.day !== today).length > 0 && (
+          <>
+            <SectionLabel style={{ marginTop: space.sm }}>Recent</SectionLabel>
+            <Card>
+              {recentLogs.filter(l => l.day !== today).map((log, i) => (
+                <Pressable
+                  key={log.id}
+                  onPress={() => navigation.navigate('LogDay', { day: log.day })}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${formatDay(log.day, { weekday: 'long', day: 'numeric', month: 'long' })}: ${summarize(log)}. Edit`}
+                  style={[styles.logRow, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border }]}
+                >
+                  <Text style={{ ...type.label, color: t.text, width: 72 }}>{formatDay(log.day, { weekday: 'short', day: 'numeric' })}</Text>
+                  <Text style={{ flex: 1, color: t.textMuted }} numberOfLines={1}>{summarize(log)}</Text>
+                  <ChevronRight color={t.subtext} size={18} />
+                </Pressable>
+              ))}
+            </Card>
+          </>
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
+function summarize(log: { flow: string | null; symptoms: string[]; mood: string | null; energy: string | null; notes: string }): string {
+  return [
+    log.flow ? `${log.flow} flow` : null,
+    log.mood ? MOOD_LABEL[log.mood] ?? log.mood : null,
+    log.symptoms.length ? `${log.symptoms.length} symptom${log.symptoms.length > 1 ? 's' : ''}` : null,
+    log.energy ? `${log.energy} energy` : null,
+  ].filter(Boolean).join(' · ') || (log.notes ? 'Notes' : 'Logged');
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  headerTitle: { fontSize: 24, fontWeight: '800', color: '#1e293b', letterSpacing: -0.5 },
-  greeting: { fontSize: 12, color: '#94a3b8', marginTop: 2 },
-  privacyPill: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 100 },
-  ringCard: {
-    marginHorizontal: 16, marginTop: 8, borderRadius: 28, padding: 24,
-    borderWidth: 1, borderColor: 'rgba(0,0,0,0.04)',
-    shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.06, shadowRadius: 32, elevation: 5,
-  },
-  dateRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 },
-  todayText: { fontSize: 18, fontWeight: '700', color: '#1e293b' },
-  dateText: { fontSize: 11, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1.5, marginTop: 2 },
-  phaseBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 100 },
-  phaseBadgeText: { fontSize: 11, fontWeight: '700' },
-  ringContainer: { alignItems: 'center', justifyContent: 'center', paddingVertical: 16 },
-  glowCircle: {
-    position: 'absolute', width: 200, height: 200, borderRadius: 100,
-    shadowOpacity: 0.25, shadowRadius: 40,
-  },
-  ringCenter: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
-  ringLabel: { fontSize: 11, textTransform: 'uppercase', letterSpacing: 2, color: '#94a3b8', fontWeight: '600' },
-  ringValue: { fontSize: 56, fontWeight: '800', marginTop: -4 },
-  ringSubLabel: { fontSize: 13, color: '#94a3b8', marginTop: -4 },
-  phaseDesc: { textAlign: 'center', color: '#64748b', fontSize: 14, marginTop: 8 },
-  confidenceNote: { textAlign: 'center', color: '#b45309', fontSize: 11, marginTop: 6, fontWeight: '600' },
-  statsRow: { flexDirection: 'row', paddingHorizontal: 16, marginTop: 16, gap: 12 },
-  statCard: { flex: 1, flexDirection: 'row', alignItems: 'center', padding: 16 },
-  statValue: { fontSize: 20, fontWeight: '800' },
-  statLabel: { fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 1 },
-  insightIcon: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  insightTitle: { fontSize: 13, fontWeight: '700', color: '#334155', marginBottom: 4 },
-  insightBody: { fontSize: 14, color: '#64748b', lineHeight: 20 },
-  insightDivider: { height: 1, backgroundColor: 'rgba(0,0,0,0.06)', marginVertical: 12 },
-  insightTip: { fontSize: 12, color: '#94a3b8' },
-  emptyState: { alignItems: 'center', paddingVertical: 20 },
-  emptyText: { fontSize: 15, fontWeight: '600', color: '#64748b' },
-  emptySubtext: { fontSize: 12, color: '#94a3b8', marginTop: 4, textAlign: 'center' },
-  logRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, gap: 10 },
-  logRowBorder: { borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.05)' },
-  logDate: { fontSize: 12, fontWeight: '700', color: '#64748b', width: 62 },
-  logSummary: { flex: 1, fontSize: 13, color: '#475569', textTransform: 'capitalize' },
+  header: { flexDirection: 'row', alignItems: 'center', marginBottom: space.lg, gap: space.md },
+  brand: { fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
+  hero: { paddingVertical: space.xl },
+  heroTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: space.sm },
+  ringWrap: { alignItems: 'center', justifyContent: 'center', marginVertical: space.lg },
+  ringCenter: { position: 'absolute', alignItems: 'center' },
+  heroLine: { ...type.heading, textAlign: 'center' },
+  heroSub: { fontSize: 13, textAlign: 'center', marginTop: space.xs },
+  stats: { flexDirection: 'row', gap: space.md, marginBottom: space.sm },
+  disclaimer: { fontSize: 12, textAlign: 'center', marginBottom: space.md },
+  iconCircle: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  logRow: { flexDirection: 'row', alignItems: 'center', minHeight: 52, gap: space.sm },
 });

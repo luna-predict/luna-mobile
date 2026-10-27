@@ -6,7 +6,7 @@ import * as Clipboard from 'expo-clipboard';
 import { useApp } from '../context/AppContext';
 import { WdkService } from '../services/WdkService';
 import { WalletState } from '../types';
-import { Card, SectionLabel, PrimaryButton, Badge } from '../ui';
+import { Card, SectionLabel, PrimaryButton, Badge, ScreenHeader, Banner } from '../ui';
 
 export default function WalletScreen() {
   const navigation = useNavigation();
@@ -109,15 +109,14 @@ export default function WalletScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: themeColors.background }]}>
-      <View style={[styles.header, { backgroundColor: themeColors.card }]}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Text style={{ fontSize: 22, color: '#64748b' }}>‹</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>WDK <Text style={{ color: themeColors.primary }}>Wallet</Text></Text>
-        <View style={{ width: 36 }} />
-      </View>
+      <ScreenHeader title="WDK" accent="wallet" subtitle="Labs · simulated" onBack={() => navigation.goBack()} />
 
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 48 }} showsVerticalScrollIndicator={false}>
+        <Banner
+          severity="warn"
+          title="Simulated wallet"
+          body="Balances and payments are local test numbers — no real funds or chain. Luna's AI runs on your phone and needs no payment. The recovery phrase is stored in the phone's secure keystore."
+        />
         {!wallet?.initialized ? (
           /* ── Connect flow ── */
           <>

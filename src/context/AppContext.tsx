@@ -1,135 +1,194 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
-import { UserProfile, AppMode, SymptomLog, CycleStatus, PregnancyStatus, PartnerLink } from '../types';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { AppState } from 'react-native';
+import {
+  UserProfile, AppMode, SymptomLog, CycleStatus, PregnancyStatus, PeriStatus, PartnerLink,
+  HealthFlag, LogDay,
+} from '../types';
 import { Store } from '../storage/Store';
-import { computeCycleStatus, computePregnancyStatus } from '../services/CycleEngine';
+import { SecureVault } from '../storage/SecureVault';
+import {
+  computeCycleStatus, computePregnancyStatus, computePeriStatus, computeFlags, todayDay, addDays,
+} from '../domain';
 import { PearsPartnerService } from '../services/PearsPartnerService';
 import { WdkService } from '../services/WdkService';
 import { ModelManager } from '../services/ModelManager';
+import { Reminders } from '../services/Reminders';
+import { ThemeColors, WOMEN_THEMES, PARTNER_THEME } from '../ui/theme';
 
-export interface ThemeColors {
-  primary: string;
-  primaryDark: string;
-  background: string;
-  card: string;
-  text: string;
-  subtext: string;
-}
+export type { ThemeColors };
 
-const WOMEN_THEMES: Record<AppMode, ThemeColors> = {
-  period: { primary: '#F43F5E', primaryDark: '#BE123C', background: '#FFF7F8', card: '#ffffff', text: '#1e293b', subtext: '#94a3b8' },
-  conceive: { primary: '#14B8A6', primaryDark: '#0F766E', background: '#F0FDFA', card: '#ffffff', text: '#1e293b', subtext: '#94a3b8' },
-  pregnancy: { primary: '#A855F7', primaryDark: '#7E22CE', background: '#FAF5FF', card: '#ffffff', text: '#1e293b', subtext: '#94a3b8' },
-  perimenopause: { primary: '#8B5CF6', primaryDark: '#6D28D9', background: '#F5F3FF', card: '#ffffff', text: '#1e293b', subtext: '#94a3b8' },
-};
-
-const MEN_THEME: ThemeColors = {
-  primary: '#3B82F6', primaryDark: '#1D4ED8', background: '#F6F9FF', card: '#ffffff', text: '#1e293b', subtext: '#94a3b8',
-};
+export type LogInput = Omit<SymptomLog, 'id' | 'date' | 'loggedAt'> & { id?: string };
 
 interface AppContextProps {
-  ready: boolean;                       // storage hydrated
+  ready: boolean;
+  today: LogDay;
   user: UserProfile | null;
   saveUser: (user: UserProfile) => Promise<void>;
   updateUser: (patch: Partial<UserProfile>) => Promise<void>;
   currentMode: AppMode;
-  setMode: (mode: AppMode) => void;
+  setMode: (mode: AppMode) => Promise<void>;
   themeColors: ThemeColors;
   logs: SymptomLog[];
-  saveLog: (log: SymptomLog) => Promise<void>;
+  getLog: (day: LogDay, mode?: AppMode) => SymptomLog | null;
+  saveLog: (log: LogInput) => Promise<void>;
+  deleteLog: (day: LogDay, mode: AppMode) => Promise<void>;
   cycle: CycleStatus | null;
   pregnancy: PregnancyStatus | null;
+  peri: PeriStatus | null;
+  flags: HealthFlag[];
+  dismissFlag: (id: string) => Promise<void>;
   partnerLink: PartnerLink | null;
   refreshPartnerLink: () => Promise<void>;
-  resetApp: () => Promise<void>;
+  resetApp: (opts?: { deleteModels?: boolean }) => Promise<void>;
 }
 
 const AppContext = createContext<AppContextProps | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [ready, setReady] = useState(false);
+  const [today, setToday] = useState<LogDay>(todayDay());
   const [user, setUser] = useState<UserProfile | null>(null);
+  const userRef = useRef<UserProfile | null>(null);
   const [logs, setLogs] = useState<SymptomLog[]>([]);
   const [partnerLink, setPartnerLink] = useState<PartnerLink | null>(null);
+  const [dismissed, setDismissed] = useState<Record<string, LogDay>>({});
 
-  // Hydrate everything once at startup
   useEffect(() => {
     (async () => {
       await Store.migrate();
-      const [storedUser, storedLogs, link] = await Promise.all([
+      const [storedUser, storedLogs, link, , , dismissedFlags] = await Promise.all([
         Store.getUser(),
         Store.getLogs(),
         PearsPartnerService.init(),
         WdkService.init(),
         ModelManager.init(),
+        Store.getDismissedFlags(),
       ]);
+      userRef.current = storedUser;
       setUser(storedUser);
       setLogs(storedLogs);
       setPartnerLink(link);
+      setDismissed(dismissedFlags);
       setReady(true);
     })();
   }, []);
 
-  const cycle = useMemo(
-    () => (user && user.sex === 'female' && user.mode !== 'pregnancy'
-      ? computeCycleStatus(user, logs)
-      : null),
-    [user, logs],
-  );
+  // "Today" rolls over at midnight and when the app returns to the foreground
+  useEffect(() => {
+    const tick = () => setToday(prev => (prev === todayDay() ? prev : todayDay()));
+    const sub = AppState.addEventListener('change', s => { if (s === 'active') tick(); });
+    const interval = setInterval(tick, 60_000);
+    return () => { sub.remove(); clearInterval(interval); };
+  }, []);
 
-  const pregnancy = useMemo(
-    () => (user && user.mode === 'pregnancy' ? computePregnancyStatus(user) : null),
-    [user],
+  const now = useMemo(() => {
+    const [y, m, d] = today.split('-').map(Number);
+    const n = new Date();
+    return new Date(y, m - 1, d, n.getHours(), n.getMinutes());
+  }, [today]);
+
+  const isWoman = user?.sex === 'female';
+  const cycle = useMemo(
+    () => (user && isWoman && (user.mode === 'period' || user.mode === 'conceive') ? computeCycleStatus(user, logs, now) : null),
+    [user, isWoman, logs, now],
   );
+  const pregnancy = useMemo(
+    () => (user && isWoman && user.mode === 'pregnancy' ? computePregnancyStatus(user, now) : null),
+    [user, isWoman, now],
+  );
+  const peri = useMemo(
+    () => (user && isWoman && user.mode === 'perimenopause' ? computePeriStatus(user, logs, now) : null),
+    [user, isWoman, logs, now],
+  );
+  const flags = useMemo(() => {
+    if (!user || !isWoman) return [];
+    return computeFlags({ user, logs, cycle, pregnancy, peri, now })
+      .filter(f => f.severity !== 'info' || !dismissed[f.id] || dismissed[f.id] < addDays(today, -30));
+  }, [user, isWoman, logs, cycle, pregnancy, peri, now, dismissed, today]);
 
   // Publish the partner snapshot whenever shared data changes (women, linked only)
   useEffect(() => {
     if (user?.sex === 'female' && partnerLink?.linked && partnerLink.role === 'sharer') {
-      const recentLog = logs.length > 0 ? logs[logs.length - 1] : null;
-      PearsPartnerService.publishSnapshot(user, cycle, pregnancy, recentLog);
+      PearsPartnerService.publishSnapshot(user, cycle, pregnancy, logs, today);
     }
-  }, [user, logs, cycle, pregnancy, partnerLink?.linked]);
+  }, [user, logs, cycle, pregnancy, partnerLink?.linked, partnerLink?.role, today]);
+
+  // Keep local reminders in step with predictions and preferences
+  useEffect(() => {
+    if (ready && user) Reminders.reschedule(user, cycle).catch(() => {});
+  }, [ready, user, cycle?.nextPeriodRange.start, cycle?.status]);
 
   const saveUser = useCallback(async (next: UserProfile) => {
+    userRef.current = next;
     setUser(next);
     await Store.saveUser(next);
   }, []);
 
   const updateUser = useCallback(async (patch: Partial<UserProfile>) => {
-    setUser(prev => {
-      if (!prev) return prev;
-      const next = { ...prev, ...patch };
-      Store.saveUser(next);
-      return next;
-    });
+    const prev = userRef.current;
+    if (!prev) return;
+    const next = { ...prev, ...patch };
+    userRef.current = next;
+    setUser(next);
+    await Store.saveUser(next);
   }, []);
 
-  const setMode = useCallback((mode: AppMode) => {
-    updateUser({ mode });
-  }, [updateUser]);
+  const setMode = useCallback((mode: AppMode) => updateUser({ mode }), [updateUser]);
 
-  const saveLog = useCallback(async (log: SymptomLog) => {
-    const updated = await Store.saveLog(log);
-    setLogs(updated);
+  const getLog = useCallback(
+    (day: LogDay, mode?: AppMode) => logs.find(l => l.day === day && (!mode || l.mode === mode)) ?? null,
+    [logs],
+  );
+
+  const saveLog = useCallback(async (input: LogInput) => {
+    const log: SymptomLog = {
+      ...input,
+      id: input.id ?? `${input.day}-${input.mode}-${Date.now().toString(36)}`,
+      date: input.day,
+      loggedAt: new Date().toISOString(),
+    };
+    setLogs(await Store.saveLog(log));
   }, []);
+
+  const deleteLog = useCallback(async (day: LogDay, mode: AppMode) => {
+    setLogs(await Store.deleteLog(day, mode));
+  }, []);
+
+  const dismissFlag = useCallback(async (id: string) => {
+    const next = { ...dismissed, [id]: today };
+    setDismissed(next);
+    await Store.saveDismissedFlags(next);
+  }, [dismissed, today]);
 
   const refreshPartnerLink = useCallback(async () => {
     setPartnerLink({ ...(PearsPartnerService.getLink() ?? await PearsPartnerService.init()) });
   }, []);
 
-  const resetApp = useCallback(async () => {
+  const resetApp = useCallback(async (opts: { deleteModels?: boolean } = {}) => {
+    const { coachEngine } = await import('../ai/engine');
+    await coachEngine.unloadAll().catch(() => {});
+    await ModelManager.reset({ deleteFiles: !!opts.deleteModels });
+    WdkService.reset();
+    PearsPartnerService.reset();
+    await SecureVault.clear();
+    await Reminders.cancelAll().catch(() => {});
     await Store.wipeAll();
+    if (!opts.deleteModels) await ModelManager.persist();
+    userRef.current = null;
     setUser(null);
     setLogs([]);
     setPartnerLink(null);
+    setDismissed({});
   }, []);
 
   const currentMode: AppMode = user?.mode ?? 'period';
-  const themeColors = user?.sex === 'male' ? MEN_THEME : WOMEN_THEMES[currentMode];
+  const themeColors = user?.sex === 'male' ? PARTNER_THEME : WOMEN_THEMES[currentMode];
 
   return (
     <AppContext.Provider value={{
-      ready, user, saveUser, updateUser, currentMode, setMode, themeColors,
-      logs, saveLog, cycle, pregnancy, partnerLink, refreshPartnerLink, resetApp,
+      ready, today, user, saveUser, updateUser, currentMode, setMode, themeColors,
+      logs, getLog, saveLog, deleteLog, cycle, pregnancy, peri, flags, dismissFlag,
+      partnerLink, refreshPartnerLink, resetApp,
     }}>
       {children}
     </AppContext.Provider>

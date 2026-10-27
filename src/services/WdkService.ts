@@ -1,6 +1,7 @@
 import * as Crypto from 'expo-crypto';
 import { WalletState, WalletTx, WalletNetwork } from '../types';
 import { Store } from '../storage/Store';
+import { SecureVault } from '../storage/SecureVault';
 
 /**
  * Tether WDK integration layer.
@@ -60,13 +61,19 @@ class WdkServiceImpl {
   /** Load persisted wallet, if any. Does NOT create one — that's an explicit user step. */
   async init(): Promise<WalletState | null> {
     if (!this.state) {
-      this.state = await Store.getWallet();
+      const stored = await Store.getWallet();
+      this.state = stored?.initialized ? { ...stored, mnemonic: await SecureVault.getMnemonic() } : null;
     }
     return this.state;
   }
 
   getState(): WalletState | null {
     return this.state;
+  }
+
+  /** Forget in-memory state (used by Delete all data). */
+  reset(): void {
+    this.state = null;
   }
 
   subscribe(fn: BalanceListener): () => void {
@@ -76,7 +83,8 @@ class WdkServiceImpl {
 
   private async persist() {
     if (this.state) {
-      await Store.saveWallet(this.state);
+      if (this.state.mnemonic) await SecureVault.setMnemonic(this.state.mnemonic);
+      await Store.saveWallet(this.state); // mnemonic is stripped by Store
       this.listeners.forEach(fn => fn(this.state!));
     }
   }
@@ -185,7 +193,8 @@ class WdkServiceImpl {
   /** Danger zone: forget the wallet on this device (recovery phrase is the only way back). */
   async resetWallet(): Promise<void> {
     this.state = null;
-    await Store.saveWallet(null as unknown as WalletState);
+    await Store.saveWallet(null);
+    await SecureVault.clear();
   }
 }
 

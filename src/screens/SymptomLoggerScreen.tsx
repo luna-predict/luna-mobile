@@ -1,19 +1,21 @@
-import React, { useState, useCallback } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, TextInput, Alert, StyleSheet } from 'react-native';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { View, Text, ScrollView, TextInput, Alert, StyleSheet, Pressable, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect } from '@react-navigation/native';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import { ChevronLeft, ChevronRight, Footprints, Trash2 } from 'lucide-react-native';
 import { useApp } from '../context/AppContext';
-import { AppMode, SymptomLog } from '../types';
-import { toISODay } from '../services/CycleEngine';
-import { Store } from '../storage/Store';
-import { Card, Chip, PrimaryButton } from '../ui';
+import { AppMode, KickSession, LogDay } from '../types';
+import { addDays, formatDay } from '../domain';
+import { Card, Chip, Button, IconButton, ScreenHeader, SettingsRow, Banner, useToast, space, type } from '../ui';
+import { MicButton } from '../ui/MicButton';
+import { extractLog, isEmpty } from '../ai/voice/extractLog';
 
 const COMMON_SYMPTOMS = [
   { id: 'cramps', emoji: '😣', label: 'Cramps' },
   { id: 'headache', emoji: '🤕', label: 'Headache' },
   { id: 'bloating', emoji: '🎈', label: 'Bloating' },
   { id: 'fatigue', emoji: '😩', label: 'Fatigue' },
-  { id: 'backache', emoji: '🔙', label: 'Back Pain' },
+  { id: 'backache', emoji: '🔙', label: 'Back pain' },
   { id: 'nausea', emoji: '🤢', label: 'Nausea' },
 ];
 
@@ -35,8 +37,8 @@ const ENERGY = [
 const FLOW_OPTIONS = [
   { id: 'spotting', emoji: '💧', label: 'Spotting' },
   { id: 'light', emoji: '🩸', label: 'Light' },
-  { id: 'medium', emoji: '🩸🩸', label: 'Medium' },
-  { id: 'heavy', emoji: '🩸🩸🩸', label: 'Heavy' },
+  { id: 'medium', emoji: '🩸', label: 'Medium' },
+  { id: 'heavy', emoji: '🩸', label: 'Heavy' },
 ];
 
 const MUCUS_OPTIONS = [
@@ -56,339 +58,403 @@ const MODE_EXTRAS: Record<AppMode, { id: string; emoji: string; label: string }[
   period: [
     { id: 'pms', emoji: '😤', label: 'PMS' },
     { id: 'cravings', emoji: '🍫', label: 'Cravings' },
-    { id: 'breast_tenderness', emoji: '🎯', label: 'Tender Breasts' },
+    { id: 'breast_tenderness', emoji: '🎯', label: 'Tender breasts' },
   ],
   conceive: [
-    { id: 'ovulation_pain', emoji: '🥚', label: 'Ovulation Pain' },
-    { id: 'breast_tenderness', emoji: '🎯', label: 'Tender Breasts' },
-    { id: 'implantation_spotting', emoji: '✨', label: 'Spotting' },
+    { id: 'ovulation_pain', emoji: '🥚', label: 'Ovulation pain' },
+    { id: 'breast_tenderness', emoji: '🎯', label: 'Tender breasts' },
+    { id: 'cravings', emoji: '🍫', label: 'Cravings' },
   ],
   pregnancy: [
-    { id: 'morning_sickness', emoji: '🤮', label: 'Morning Sickness' },
+    { id: 'morning_sickness', emoji: '🤮', label: 'Morning sickness' },
     { id: 'heartburn', emoji: '🔥', label: 'Heartburn' },
     { id: 'swelling', emoji: '🦶', label: 'Swelling' },
     { id: 'contractions', emoji: '⚡', label: 'Contractions' },
   ],
   perimenopause: [
-    { id: 'hot_flash', emoji: '🔥', label: 'Hot Flash' },
-    { id: 'night_sweats', emoji: '🌙', label: 'Night Sweats' },
-    { id: 'brain_fog', emoji: '🌫️', label: 'Brain Fog' },
-    { id: 'joint_pain', emoji: '🦴', label: 'Joint Pain' },
+    { id: 'hot_flash', emoji: '🔥', label: 'Hot flash' },
+    { id: 'night_sweats', emoji: '🌙', label: 'Night sweats' },
+    { id: 'brain_fog', emoji: '🌫️', label: 'Brain fog' },
+    { id: 'joint_pain', emoji: '🦴', label: 'Joint pain' },
   ],
 };
 
-/** Which optional tracking sections each mode shows */
-const MODE_SECTIONS: Record<AppMode, { flow: boolean; bbt: boolean; mucus: boolean; opk: boolean; kicks: boolean; hotFlashes: boolean; sleep: boolean }> = {
-  period: { flow: true, bbt: false, mucus: false, opk: false, kicks: false, hotFlashes: false, sleep: true },
-  conceive: { flow: true, bbt: true, mucus: true, opk: true, kicks: false, hotFlashes: false, sleep: false },
-  pregnancy: { flow: false, bbt: false, mucus: false, opk: false, kicks: true, hotFlashes: false, sleep: true },
-  perimenopause: { flow: true, bbt: false, mucus: false, opk: false, kicks: false, hotFlashes: true, sleep: true },
+const MODE_SECTIONS: Record<AppMode, { flow: boolean; fertility: boolean; kicks: boolean; hotFlashes: boolean; sleep: boolean }> = {
+  period: { flow: true, fertility: false, kicks: false, hotFlashes: false, sleep: true },
+  conceive: { flow: true, fertility: true, kicks: false, hotFlashes: false, sleep: true },
+  pregnancy: { flow: true, fertility: false, kicks: true, hotFlashes: false, sleep: true },
+  perimenopause: { flow: true, fertility: false, kicks: false, hotFlashes: true, sleep: true },
 };
 
-export default function SymptomLoggerScreen() {
-  const { themeColors, currentMode, saveLog } = useApp();
-  const sections = MODE_SECTIONS[currentMode];
+type LogRoute = RouteProp<{ Log: { day?: LogDay; periodStart?: boolean } | undefined }, 'Log'>;
 
-  const [selectedSymptoms, setSelectedSymptoms] = useState<string[]>([]);
-  const [selectedMood, setSelectedMood] = useState<string | null>(null);
-  const [selectedEnergy, setSelectedEnergy] = useState<string | null>(null);
-  const [selectedFlow, setSelectedFlow] = useState<string | null>(null);
+export default function SymptomLoggerScreen() {
+  const navigation = useNavigation();
+  const route = useRoute<LogRoute>();
+  const toast = useToast();
+  const { themeColors: t, currentMode, saveLog, deleteLog, getLog, today, user, pregnancy } = useApp();
+  const sections = MODE_SECTIONS[currentMode];
+  const isStackRoute = route.name === ('LogDay' as string);
+  const [day, setDay] = useState<LogDay>(route.params?.day ?? today);
+
+  const [symptoms, setSymptoms] = useState<string[]>([]);
+  const [mood, setMood] = useState<string | null>(null);
+  const [energy, setEnergy] = useState<string | null>(null);
+  const [flow, setFlow] = useState<string | null>(null);
+  const [periodStart, setPeriodStart] = useState(false);
+  const [periodEnd, setPeriodEnd] = useState(false);
   const [bbt, setBbt] = useState('');
   const [mucus, setMucus] = useState<string | null>(null);
   const [opk, setOpk] = useState<'positive' | 'negative' | null>(null);
-  const [kicks, setKicks] = useState(0);
+  const [kickSessions, setKickSessions] = useState<KickSession[]>([]);
   const [hotFlashes, setHotFlashes] = useState(0);
   const [sleep, setSleep] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
-  const [editingExisting, setEditingExisting] = useState(false);
+  const [bbtError, setBbtError] = useState<string | null>(null);
+  const existing = getLog(day, currentMode);
 
-  // Load today's log for editing when the tab gains focus or mode changes
-  useFocusEffect(useCallback(() => {
-    Store.getLogForDay(toISODay(new Date()), currentMode).then(log => {
-      if (log) {
-        setEditingExisting(true);
-        setSelectedSymptoms(log.symptoms);
-        setSelectedMood(log.mood);
-        setSelectedEnergy(log.energy);
-        setSelectedFlow(log.flow);
-        setBbt(log.bbt != null ? String(log.bbt) : '');
-        setMucus(log.cervicalMucus ?? null);
-        setOpk(log.opkResult ?? null);
-        setKicks(log.kicksCount ?? 0);
-        setHotFlashes(log.hotFlashCount ?? 0);
-        setSleep(log.sleepQuality ?? null);
-        setNotes(log.notes);
-      } else {
-        setEditingExisting(false);
-        setSelectedSymptoms([]); setSelectedMood(null); setSelectedEnergy(null); setSelectedFlow(null);
-        setBbt(''); setMucus(null); setOpk(null); setKicks(0); setHotFlashes(0); setSleep(null); setNotes('');
-      }
-    });
-  }, [currentMode]));
+  // Follow route params (Calendar → "Log this day", Dashboard → "It started")
+  useEffect(() => {
+    if (route.params?.day) setDay(route.params.day);
+  }, [route.params?.day]);
 
-  const toggleSymptom = (id: string) => {
-    setSelectedSymptoms(prev => prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]);
-  };
+  // Prefill from the stored log whenever the day or mode changes
+  useEffect(() => {
+    const log = getLog(day, currentMode);
+    setSymptoms(log?.symptoms ?? []);
+    setMood(log?.mood ?? null);
+    setEnergy(log?.energy ?? null);
+    setFlow(log?.flow ?? (route.params?.periodStart && day === route.params.day ? 'medium' : null));
+    setPeriodStart(log?.periodStart ?? (!!route.params?.periodStart && day === route.params?.day));
+    setPeriodEnd(log?.periodEnd ?? false);
+    setBbt(log?.bbt != null ? String(log.bbt) : '');
+    setMucus(log?.cervicalMucus ?? null);
+    setOpk(log?.opkResult ?? null);
+    setKickSessions(log?.kickSessions ?? []);
+    setHotFlashes(log?.hotFlashCount ?? 0);
+    setSleep(log?.sleepQuality ?? null);
+    setNotes(log?.notes ?? '');
+    setBbtError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [day, currentMode]);
 
-  const hasData = selectedSymptoms.length > 0 || !!selectedMood || !!selectedEnergy || !!selectedFlow ||
-    !!bbt || !!mucus || !!opk || kicks > 0 || hotFlashes > 0 || !!sleep || notes.trim().length > 0;
+  const hasData = symptoms.length > 0 || !!mood || !!energy || !!flow || periodStart || periodEnd || !!bbt || !!mucus || !!opk
+    || kickSessions.length > 0 || hotFlashes > 0 || !!sleep || notes.trim().length > 0;
+
+  const toggle = (id: string) => setSymptoms(prev => (prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]));
 
   const handleSave = async () => {
-    const bbtNum = bbt ? parseFloat(bbt.replace(',', '.')) : null;
-    if (bbt && (bbtNum == null || isNaN(bbtNum) || bbtNum < 34 || bbtNum > 42)) {
-      Alert.alert('Check BBT', 'Basal body temperature should be between 34.0 and 42.0 °C.');
-      return;
+    let bbtNum: number | null = null;
+    if (bbt.trim()) {
+      bbtNum = parseFloat(bbt.replace(',', '.'));
+      if (isNaN(bbtNum) || bbtNum < 34 || bbtNum > 42) {
+        setBbtError('Enter a temperature between 34.0 and 42.0 °C');
+        return;
+      }
     }
-    const log: SymptomLog = {
-      id: Date.now().toString(),
-      date: new Date().toISOString(),
-      symptoms: selectedSymptoms,
-      mood: selectedMood,
-      energy: selectedEnergy,
-      flow: selectedFlow,
+    await saveLog({
+      id: existing?.id,
+      day,
+      mode: currentMode,
+      symptoms,
+      mood,
+      energy,
+      flow,
+      periodStart: periodStart || undefined,
+      periodEnd: periodEnd || undefined,
       bbt: bbtNum,
       cervicalMucus: mucus,
       opkResult: opk,
-      kicksCount: sections.kicks ? kicks : null,
+      kickSessions: kickSessions.length ? kickSessions : undefined,
       hotFlashCount: sections.hotFlashes ? hotFlashes : null,
       sleepQuality: sleep,
       notes: notes.trim(),
-      mode: currentMode,
-    };
-    await saveLog(log);
-    Alert.alert(
-      editingExisting ? 'Updated ✨' : 'Saved ✨',
-      'Logged locally and added to your on-device RAG index. Predictions update instantly.',
-    );
-    setEditingExisting(true);
+    });
+    toast.show(existing ? 'Log updated — predictions refreshed' : 'Saved — predictions refreshed');
+    if (isStackRoute) navigation.goBack();
   };
 
-  const handleVoiceLog = () => {
-    Alert.alert(
-      'Voice logging 🎙️',
-      'Whisper transcribes your voice fully on-device. Download the Whisper model from Profile → AI Models to enable this.',
-    );
+  const handleClear = () => {
+    Alert.alert('Clear this day?', `Remove everything logged for ${formatDay(day, { weekday: 'long', month: 'long', day: 'numeric' })}.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Clear', style: 'destructive', onPress: async () => { await deleteLog(day, currentMode); toast.show('Day cleared', 'info'); } },
+    ]);
   };
 
-  const allSymptoms = [...COMMON_SYMPTOMS, ...MODE_EXTRAS[currentMode]];
-  const dateLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+  const onVoiceText = useCallback((text: string) => {
+    const e = extractLog(text);
+    if (isEmpty(e)) {
+      setNotes(prev => (prev ? `${prev} ${text}` : text));
+      toast.show('Added what you said to notes', 'info');
+      return;
+    }
+    setSymptoms(prev => [...new Set([...prev, ...e.symptoms])]);
+    if (e.mood) setMood(e.mood);
+    if (e.energy) setEnergy(e.energy);
+    if (e.flow && sections.flow) setFlow(e.flow);
+    if (e.periodStart) setPeriodStart(true);
+    if (e.bbt != null && sections.fertility) setBbt(String(e.bbt));
+    if (e.hotFlashes != null && sections.hotFlashes) setHotFlashes(e.hotFlashes);
+    toast.show('Filled in from your voice — check and save', 'info');
+  }, [sections, toast]);
 
-  const Counter = ({ value, onChange, label }: { value: number; onChange: (n: number) => void; label: string }) => (
-    <View style={styles.counterRow}>
-      <TouchableOpacity style={styles.counterBtn} onPress={() => onChange(Math.max(0, value - 1))}>
-        <Text style={styles.counterBtnText}>−</Text>
-      </TouchableOpacity>
-      <View style={{ alignItems: 'center', minWidth: 80 }}>
-        <Text style={[styles.counterValue, { color: themeColors.primary }]}>{value}</Text>
-        <Text style={styles.counterLabel}>{label}</Text>
-      </View>
-      <TouchableOpacity style={[styles.counterBtn, { backgroundColor: themeColors.primary }]} onPress={() => onChange(value + 1)}>
-        <Text style={[styles.counterBtnText, { color: '#fff' }]}>+</Text>
-      </TouchableOpacity>
-    </View>
-  );
+  const onVoiceError = useCallback((m: string) => toast.show(m, 'error'), [toast]);
+
+  const allSymptoms = useMemo(() => {
+    const seen = new Set<string>();
+    return [...COMMON_SYMPTOMS, ...MODE_EXTRAS[currentMode]].filter(s => (seen.has(s.id) ? false : (seen.add(s.id), true)));
+  }, [currentMode]);
+
+  const isToday = day === today;
+  const dateLabel = isToday ? 'Today' : formatDay(day, { weekday: 'long', month: 'short', day: 'numeric' });
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: themeColors.background }]}>
-      {/* Header */}
-      <View style={[styles.header, { backgroundColor: themeColors.card }]}>
-        <View>
-          <Text style={styles.headerTitle}>Daily Log</Text>
-          <Text style={styles.headerDate}>{dateLabel}{editingExisting ? ' · editing today' : ''}</Text>
-        </View>
-        <View style={{ flexDirection: 'row', gap: 12 }}>
-          <TouchableOpacity onPress={handleVoiceLog} style={[styles.saveBtn, { backgroundColor: themeColors.primary + '15' }]}>
-            <Text style={{ fontSize: 18 }}>🎙️</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={handleSave}
-            disabled={!hasData}
-            style={[styles.saveBtn, { backgroundColor: hasData ? themeColors.primary : '#e2e8f0' }]}
-          >
-            <Text style={{ color: hasData ? '#fff' : '#94a3b8', fontWeight: '700', fontSize: 14 }}>✓</Text>
-          </TouchableOpacity>
-        </View>
+    <SafeAreaView edges={['top']} style={[styles.container, { backgroundColor: t.background }]}>
+      <ScreenHeader
+        title={isToday ? 'Log today' : 'Log a day'}
+        subtitle={`${dateLabel}${existing ? ' · editing' : ''}`}
+        onBack={isStackRoute ? () => navigation.goBack() : undefined}
+        right={<MicButton testID="log-mic" language={user?.language ?? 'en'} onText={onVoiceText} onError={onVoiceError} />}
+      />
+
+      {/* Day switcher */}
+      <View style={[styles.dayBar, { backgroundColor: t.card, borderBottomColor: t.border }]}>
+        <IconButton icon={ChevronLeft} label="Previous day" onPress={() => setDay(d => addDays(d, -1))} testID="log-prev-day" />
+        <Text style={{ ...type.label, color: t.text }} accessibilityLiveRegion="polite">
+          {formatDay(day, { weekday: 'short', month: 'short', day: 'numeric' })}
+        </Text>
+        <IconButton icon={ChevronRight} label="Next day" onPress={() => setDay(d => addDays(d, 1))} disabled={isToday} testID="log-next-day" />
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
-        {/* Mood */}
-        <Card>
-          <Text style={styles.sectionTitle}>🎭 How are you feeling?</Text>
-          <View style={styles.chipGrid}>
-            {MOODS.map(m => (
-              <Chip key={m.id} emoji={m.emoji} label={m.label} selected={selectedMood === m.id}
-                onPress={() => setSelectedMood(selectedMood === m.id ? null : m.id)} style={{ width: '30%' }} />
-            ))}
-          </View>
-        </Card>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: 120 }} keyboardShouldPersistTaps="handled">
+          {currentMode === 'pregnancy' && flow && (
+            <Banner severity="urgent" title="Bleeding during pregnancy" body="Contact your midwife or doctor today. If it is heavy or painful, call emergency services." />
+          )}
 
-        {/* Energy */}
-        <Card>
-          <Text style={styles.sectionTitle}>⚡ Energy Level</Text>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            {ENERGY.map(e => (
-              <Chip key={e.id} emoji={e.emoji} label={e.label} selected={selectedEnergy === e.id} color="#eab308"
-                onPress={() => setSelectedEnergy(selectedEnergy === e.id ? null : e.id)} style={{ flex: 1 }} />
-            ))}
-          </View>
-        </Card>
-
-        {/* Flow */}
-        {sections.flow && (
           <Card>
-            <Text style={styles.sectionTitle}>🩸 Flow</Text>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              {FLOW_OPTIONS.map(f => (
-                <Chip key={f.id} emoji={f.emoji} label={f.label} selected={selectedFlow === f.id} color="#ec4899"
-                  onPress={() => setSelectedFlow(selectedFlow === f.id ? null : f.id)} style={{ flex: 1 }} />
+            <Text style={[styles.sectionTitle, { color: t.text }]}>How are you feeling?</Text>
+            <View style={styles.grid}>
+              {MOODS.map(m => (
+                <Chip key={m.id} emoji={m.emoji} label={m.label} selected={mood === m.id}
+                  onPress={() => setMood(mood === m.id ? null : m.id)} style={styles.third} testID={`mood-${m.id}`} />
               ))}
             </View>
           </Card>
-        )}
 
-        {/* Conceive: BBT + mucus + OPK */}
-        {sections.bbt && (
           <Card>
-            <Text style={styles.sectionTitle}>🌡️ Basal Body Temperature</Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <Text style={[styles.sectionTitle, { color: t.text }]}>Energy</Text>
+            <View style={styles.row}>
+              {ENERGY.map(e => (
+                <Chip key={e.id} emoji={e.emoji} label={e.label} selected={energy === e.id}
+                  onPress={() => setEnergy(energy === e.id ? null : e.id)} style={{ flex: 1 }} testID={`energy-${e.id}`} />
+              ))}
+            </View>
+          </Card>
+
+          {sections.flow && (
+            <Card>
+              <Text style={[styles.sectionTitle, { color: t.text }]}>{currentMode === 'pregnancy' ? 'Any bleeding?' : 'Flow'}</Text>
+              <View style={styles.row}>
+                {FLOW_OPTIONS.map(f => (
+                  <Chip key={f.id} emoji={f.emoji} label={f.label} selected={flow === f.id} color={t.primaryStrong}
+                    onPress={() => setFlow(flow === f.id ? null : f.id)} style={{ flex: 1 }} testID={`flow-${f.id}`} />
+                ))}
+              </View>
+              {currentMode !== 'pregnancy' && (
+                <View style={{ marginTop: space.sm }}>
+                  <SettingsRow first label="My period started this day" toggle={{ value: periodStart, onChange: v => { setPeriodStart(v); if (v) { setPeriodEnd(false); if (!flow || flow === 'spotting') setFlow('medium'); } } }} testID="toggle-period-start" />
+                  <SettingsRow label="My period ended this day" toggle={{ value: periodEnd, onChange: v => { setPeriodEnd(v); if (v) setPeriodStart(false); } }} testID="toggle-period-end" />
+                  <Text style={[styles.hint, { color: t.subtext }]}>Spotting never counts as a new period. Mark the start yourself if Luna gets it wrong.</Text>
+                </View>
+              )}
+            </Card>
+          )}
+
+          {sections.fertility && (
+            <Card>
+              <Text style={[styles.sectionTitle, { color: t.text }]}>Fertility signs</Text>
+              <Text style={[styles.label, { color: t.textMuted }]}>Basal body temperature (°C)</Text>
               <TextInput
-                style={[styles.bbtInput, { flex: 1 }]}
-                placeholder="36.5"
-                placeholderTextColor="#94a3b8"
+                testID="bbt-input"
+                style={[styles.input, { borderColor: bbtError ? t.danger : t.border, color: t.text, backgroundColor: t.surface }]}
+                placeholder="e.g. 36.5"
+                placeholderTextColor={t.subtext}
                 value={bbt}
-                onChangeText={setBbt}
+                onChangeText={v => { setBbt(v); setBbtError(null); }}
                 keyboardType="decimal-pad"
                 maxLength={5}
+                accessibilityLabel="Basal body temperature in degrees Celsius"
               />
-              <Text style={{ fontSize: 16, fontWeight: '700', color: '#64748b' }}>°C</Text>
-            </View>
-            <Text style={styles.hint}>Measure first thing in the morning, before getting up</Text>
-          </Card>
-        )}
-        {sections.mucus && (
-          <Card>
-            <Text style={styles.sectionTitle}>💧 Cervical Mucus</Text>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              {MUCUS_OPTIONS.map(m => (
-                <Chip key={m.id} emoji={m.emoji} label={m.label} selected={mucus === m.id} color="#14B8A6"
-                  onPress={() => setMucus(mucus === m.id ? null : m.id)} style={{ flex: 1 }} />
-              ))}
-            </View>
-            <Text style={styles.hint}>Egg-white consistency signals peak fertility</Text>
-          </Card>
-        )}
-        {sections.opk && (
-          <Card>
-            <Text style={styles.sectionTitle}>🧪 Ovulation Test (OPK)</Text>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              <Chip emoji="✅" label="Positive" selected={opk === 'positive'} color="#059669"
-                onPress={() => setOpk(opk === 'positive' ? null : 'positive')} style={{ flex: 1 }} />
-              <Chip emoji="➖" label="Negative" selected={opk === 'negative'} color="#64748b"
-                onPress={() => setOpk(opk === 'negative' ? null : 'negative')} style={{ flex: 1 }} />
-            </View>
-          </Card>
-        )}
+              {bbtError
+                ? <Text style={[styles.hint, { color: t.danger }]} accessibilityLiveRegion="polite">{bbtError}</Text>
+                : <Text style={[styles.hint, { color: t.subtext }]}>Measure first thing in the morning, before getting up.</Text>}
 
-        {/* Pregnancy: kicks */}
-        {sections.kicks && (
-          <Card>
-            <Text style={styles.sectionTitle}>🦶 Baby Kicks Today</Text>
-            <Counter value={kicks} onChange={setKicks} label="kicks" />
-          </Card>
-        )}
-
-        {/* Perimenopause: hot flashes */}
-        {sections.hotFlashes && (
-          <Card>
-            <Text style={styles.sectionTitle}>🔥 Hot Flashes Today</Text>
-            <Counter value={hotFlashes} onChange={setHotFlashes} label="episodes" />
-          </Card>
-        )}
-
-        {/* Sleep */}
-        {sections.sleep && (
-          <Card>
-            <Text style={styles.sectionTitle}>😴 Sleep Quality</Text>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              {SLEEP_OPTIONS.map(s => (
-                <Chip key={s.id} emoji={s.emoji} label={s.label} selected={sleep === s.id} color="#6366f1"
-                  onPress={() => setSleep(sleep === s.id ? null : s.id)} style={{ flex: 1 }} />
-              ))}
-            </View>
-          </Card>
-        )}
-
-        {/* Symptoms */}
-        <Card>
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-            <Text style={[styles.sectionTitle, { marginBottom: 0 }]}>📋 Symptoms</Text>
-            {selectedSymptoms.length > 0 && (
-              <View style={[styles.countBadge, { backgroundColor: themeColors.primary + '15' }]}>
-                <Text style={[styles.countText, { color: themeColors.primary }]}>{selectedSymptoms.length}</Text>
+              <Text style={[styles.label, { color: t.textMuted, marginTop: space.lg }]}>Cervical mucus</Text>
+              <View style={styles.row}>
+                {MUCUS_OPTIONS.map(m => (
+                  <Chip key={m.id} emoji={m.emoji} label={m.label} selected={mucus === m.id}
+                    onPress={() => setMucus(mucus === m.id ? null : m.id)} style={{ flex: 1 }} />
+                ))}
               </View>
-            )}
-          </View>
-          <View style={styles.chipGrid}>
-            {allSymptoms.map(s => (
-              <Chip key={s.id} emoji={s.emoji} label={s.label} selected={selectedSymptoms.includes(s.id)}
-                onPress={() => toggleSymptom(s.id)} style={{ width: '30%' }} />
-            ))}
-          </View>
-        </Card>
 
-        {/* Notes */}
-        <Card>
-          <Text style={styles.sectionTitle}>✏️ Notes <Text style={styles.privateTag}>never shared</Text></Text>
-          <TextInput
-            style={styles.notesInput}
-            placeholder="Add any notes for today…"
-            placeholderTextColor="#94a3b8"
-            value={notes}
-            onChangeText={setNotes}
-            multiline
-            textAlignVertical="top"
-          />
-        </Card>
+              <Text style={[styles.label, { color: t.textMuted, marginTop: space.lg }]}>Ovulation test (OPK)</Text>
+              <View style={styles.row}>
+                <Chip emoji="✅" label="Positive" selected={opk === 'positive'} onPress={() => setOpk(opk === 'positive' ? null : 'positive')} style={{ flex: 1 }} testID="opk-positive" />
+                <Chip emoji="➖" label="Negative" selected={opk === 'negative'} onPress={() => setOpk(opk === 'negative' ? null : 'negative')} style={{ flex: 1 }} />
+              </View>
+            </Card>
+          )}
 
-        <PrimaryButton
-          label={editingExisting ? "Update Today's Log" : "Save Today's Log"}
-          onPress={handleSave}
-          disabled={!hasData}
-        />
-      </ScrollView>
+          {sections.kicks && (
+            <KickCounter sessions={kickSessions} onChange={setKickSessions} week={pregnancy?.week ?? 0} />
+          )}
+
+          {sections.hotFlashes && (
+            <Card>
+              <Text style={[styles.sectionTitle, { color: t.text }]}>Hot flashes</Text>
+              <Counter value={hotFlashes} onChange={setHotFlashes} label="hot flashes" />
+            </Card>
+          )}
+
+          {sections.sleep && (
+            <Card>
+              <Text style={[styles.sectionTitle, { color: t.text }]}>Sleep last night</Text>
+              <View style={styles.row}>
+                {SLEEP_OPTIONS.map(s => (
+                  <Chip key={s.id} emoji={s.emoji} label={s.label} selected={sleep === s.id}
+                    onPress={() => setSleep(sleep === s.id ? null : s.id)} style={{ flex: 1 }} />
+                ))}
+              </View>
+            </Card>
+          )}
+
+          <Card>
+            <Text style={[styles.sectionTitle, { color: t.text }]}>Symptoms{symptoms.length ? ` · ${symptoms.length}` : ''}</Text>
+            <View style={styles.grid}>
+              {allSymptoms.map(s => (
+                <Chip key={s.id} emoji={s.emoji} label={s.label} selected={symptoms.includes(s.id)}
+                  onPress={() => toggle(s.id)} style={styles.third} testID={`symptom-${s.id}`} />
+              ))}
+            </View>
+          </Card>
+
+          <Card>
+            <Text style={[styles.sectionTitle, { color: t.text }]}>Notes</Text>
+            <TextInput
+              style={[styles.input, styles.notes, { borderColor: t.border, color: t.text, backgroundColor: t.surface }]}
+              placeholder="Anything else? Only you (and Luna on this phone) can see this."
+              placeholderTextColor={t.subtext}
+              value={notes}
+              onChangeText={setNotes}
+              multiline
+              accessibilityLabel="Notes"
+            />
+          </Card>
+
+          {existing && (
+            <Button label="Clear this day" variant="danger" icon={Trash2} onPress={handleClear} />
+          )}
+        </ScrollView>
+
+        <View style={[styles.saveBar, { backgroundColor: t.card, borderTopColor: t.border }]}>
+          <Button testID="log-save" label={existing ? 'Update log' : 'Save log'} onPress={handleSave} disabled={!hasData} />
+        </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
+  );
+}
+
+function Counter({ value, onChange, label }: { value: number; onChange: (n: number) => void; label: string }) {
+  const t = useApp().themeColors;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.xl }}>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Fewer ${label}`} onPress={() => onChange(Math.max(0, value - 1))}
+        style={[styles.counterBtn, { backgroundColor: t.surface }]}>
+        <Text style={{ fontSize: 26, color: t.text }}>−</Text>
+      </Pressable>
+      <Text style={{ fontSize: 34, fontWeight: '800', color: t.primaryStrong, minWidth: 60, textAlign: 'center' }} accessibilityLabel={`${value} ${label}`}>{value}</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel={`More ${label}`} onPress={() => onChange(value + 1)}
+        style={[styles.counterBtn, { backgroundColor: t.primaryStrong }]}>
+        <Text style={{ fontSize: 26, color: '#FFFFFF' }}>+</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+/** Kick counting as timed sessions: 10 movements, or stop at 2 hours (ACOG guidance, 03 A8). */
+function KickCounter({ sessions, onChange, week }: { sessions: KickSession[]; onChange: (s: KickSession[]) => void; week: number }) {
+  const t = useApp().themeColors;
+  const [active, setActive] = useState<{ start: number; count: number } | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (active) timer.current = setInterval(() => setNow(Date.now()), 1000);
+    return () => { if (timer.current) clearInterval(timer.current); };
+  }, [active]);
+
+  const finish = useCallback((count: number, start: number) => {
+    onChange([...sessions, { start: new Date(start).toISOString(), end: new Date().toISOString(), count }]);
+    setActive(null);
+  }, [sessions, onChange]);
+
+  useEffect(() => {
+    if (active && now - active.start >= 2 * 3600_000) finish(active.count, active.start);
+  }, [now, active, finish]);
+
+  const elapsedMin = active ? Math.floor((now - active.start) / 60000) : 0;
+  const last = sessions[sessions.length - 1];
+
+  return (
+    <Card>
+      <Text style={[styles.sectionTitle, { color: t.text }]}>Baby movements</Text>
+      {week < 28 && <Text style={[styles.hint, { color: t.subtext, marginBottom: space.sm }]}>Kick counting is recommended from 28 weeks. You can practise now.</Text>}
+      {active ? (
+        <View style={{ alignItems: 'center', gap: space.md }}>
+          <Pressable
+            testID="kick-tap"
+            onPress={() => {
+              const count = active.count + 1;
+              if (count >= 10) finish(count, active.start);
+              else setActive({ ...active, count });
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={`Count a movement. ${active.count} of 10 so far`}
+            style={[styles.kickTap, { backgroundColor: t.primaryStrong }]}
+          >
+            <Footprints color="#FFFFFF" size={36} />
+            <Text style={{ color: '#FFFFFF', fontSize: 32, fontWeight: '800' }}>{active.count}/10</Text>
+          </Pressable>
+          <Text style={{ color: t.textMuted }}>{elapsedMin} min · tap each time you feel a movement</Text>
+          <Button label="Stop session" variant="outline" compact onPress={() => finish(active.count, active.start)} />
+        </View>
+      ) : (
+        <>
+          {last && (
+            <Text style={{ color: t.textMuted, marginBottom: space.sm }}>
+              Last session: {last.count} movements in {Math.max(1, Math.round((new Date(last.end).getTime() - new Date(last.start).getTime()) / 60000))} min
+            </Text>
+          )}
+          <Button testID="kick-start" label="Start a kick count" icon={Footprints} variant="tonal" onPress={() => setActive({ start: Date.now(), count: 0 })} />
+        </>
+      )}
+    </Card>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    paddingHorizontal: 24, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)',
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-  },
-  headerTitle: { fontSize: 20, fontWeight: '700', color: '#1e293b' },
-  headerDate: { fontSize: 12, color: '#94a3b8', marginTop: 2 },
-  saveBtn: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
-  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#334155', marginBottom: 12 },
-  privateTag: { fontSize: 10, fontWeight: '700', color: '#94a3b8' },
-  chipGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  bbtInput: {
-    backgroundColor: '#f8fafc', borderRadius: 14, paddingHorizontal: 16, paddingVertical: 12,
-    fontSize: 22, fontWeight: '700', color: '#1e293b', borderWidth: 1, borderColor: '#e2e8f0', textAlign: 'center',
-  },
-  hint: { fontSize: 11.5, color: '#94a3b8', marginTop: 8 },
-  counterRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 18, paddingVertical: 4 },
-  counterBtn: {
-    width: 44, height: 44, borderRadius: 22, backgroundColor: '#f1f5f9',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  counterBtnText: { fontSize: 22, color: '#64748b', fontWeight: '600' },
-  counterValue: { fontSize: 30, fontWeight: '800' },
-  counterLabel: { fontSize: 11, color: '#94a3b8', fontWeight: '600' },
-  countBadge: { marginLeft: 8, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12 },
-  countText: { fontSize: 12, fontWeight: '700' },
-  notesInput: {
-    backgroundColor: '#f8fafc', borderRadius: 16, padding: 14, fontSize: 14,
-    borderWidth: 1, borderColor: '#e2e8f0', minHeight: 96, color: '#334155',
-  },
+  dayBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: space.sm, borderBottomWidth: StyleSheet.hairlineWidth },
+  sectionTitle: { ...type.heading, marginBottom: space.md },
+  label: { ...type.label, marginBottom: space.sm },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  third: { width: '31.5%' },
+  row: { flexDirection: 'row', gap: space.sm },
+  hint: { fontSize: 13, lineHeight: 18, marginTop: space.sm },
+  input: { borderWidth: 1.5, borderRadius: 14, paddingHorizontal: space.lg, minHeight: 52, fontSize: 16 },
+  notes: { minHeight: 96, paddingTop: space.md, textAlignVertical: 'top' },
+  counterBtn: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center' },
+  kickTap: { width: 160, height: 160, borderRadius: 80, alignItems: 'center', justifyContent: 'center', gap: 4 },
+  saveBar: { padding: space.lg, borderTopWidth: StyleSheet.hairlineWidth },
 });

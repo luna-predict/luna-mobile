@@ -1,240 +1,237 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, ScrollView, StyleSheet, Pressable, Alert, Switch } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, NavigationProp } from '@react-navigation/native';
-import * as Clipboard from 'expo-clipboard';
+import { File, Paths } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import {
+  Droplet, Baby, HeartPulse, Flower2, Brain, HeartHandshake, Wallet, Bell, CalendarClock, Download, Trash2, Info,
+  FlaskConical, Languages, Volume2, Lock, Check,
+} from 'lucide-react-native';
 import { useApp } from '../context/AppContext';
-import { AppMode } from '../types';
+import { AppMode, CoachLanguage } from '../types';
+import { Card, SectionLabel, SettingsRow, Badge, Sheet, Button, Segmented, useToast, space, type, radius } from '../ui';
+import { ModelManager } from '../services/ModelManager';
+import { Reminders } from '../services/Reminders';
 import { Store } from '../storage/Store';
-import { WdkService } from '../services/WdkService';
-import { ModelManager, MODEL_CATALOG } from '../services/ModelManager';
+import { useModelRegistryVersion } from '../ai/useModels';
+import { coachEngine } from '../ai/engine';
 import { RootStackParamList } from '../navigation/AppNavigator';
-import { Card, SectionLabel, SettingsRow, Badge } from '../ui';
+import { ModeSetupSheet, needsSetup } from './components/ModeSetupSheet';
 
-const modes: { id: AppMode; label: string; emoji: string; desc: string; color: string }[] = [
-  { id: 'period', label: 'Track My Cycle', emoji: '🩸', desc: 'Predict periods & symptoms', color: '#F43F5E' },
-  { id: 'conceive', label: 'Get Pregnant', emoji: '👶', desc: 'Identify fertile days', color: '#14B8A6' },
-  { id: 'pregnancy', label: 'Follow Pregnancy', emoji: '🤰', desc: 'Track baby growth', color: '#A855F7' },
-  { id: 'perimenopause', label: 'Navigate Changes', emoji: '🌿', desc: 'Manage transition', color: '#8B5CF6' },
+const GOALS: { id: AppMode; label: string; desc: string; icon: React.ComponentType<{ color?: string; size?: number }> }[] = [
+  { id: 'period', label: 'Track my cycle', desc: 'Periods, symptoms and predictions', icon: Droplet },
+  { id: 'conceive', label: 'Trying to conceive', desc: 'Fertile window, ovulation tests, temperature', icon: HeartPulse },
+  { id: 'pregnancy', label: 'Pregnancy', desc: 'Week by week, kick counts, due date', icon: Baby },
+  { id: 'perimenopause', label: 'Perimenopause', desc: 'Transition stage, hot flashes, sleep', icon: Flower2 },
 ];
+
+const CHECKIN_TIMES = [{ value: '08:00', label: 'Morning' }, { value: '13:00', label: 'Midday' }, { value: '20:00', label: 'Evening' }];
 
 export default function ProfileScreen() {
   const navigation = useNavigation<NavigationProp<RootStackParamList>>();
-  const { currentMode, setMode, themeColors, user, updateUser, partnerLink, resetApp, logs } = useApp();
-  const isMale = user?.sex === 'male';
+  const toast = useToast();
+  const { currentMode, themeColors: t, user, updateUser, partnerLink, resetApp, logs, cycle } = useApp();
+  const isPartner = user?.sex === 'male';
+  const [setupTarget, setSetupTarget] = useState<AppMode | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteModels, setDeleteModels] = useState(false);
+  useModelRegistryVersion();
 
-  const [walletSummary, setWalletSummary] = useState<string>('Not set up');
-  const [modelSummary, setModelSummary] = useState<string>('None downloaded');
+  if (!user) return null;
+  const activeModel = ModelManager.getActiveModel();
+  const engineKind = coachEngine.kind();
+  const language: CoachLanguage = user.language ?? 'en';
 
-  useEffect(() => {
-    const refresh = () => {
-      const w = WdkService.getState();
-      setWalletSummary(w?.initialized ? `${w.balanceUsdt.toFixed(2)} USDt · ${w.network}` : 'Not set up');
-      ModelManager.init().then(entries => {
-        const downloaded = entries.filter(e => e.state.status === 'downloaded').length;
-        const active = ModelManager.getActiveModel();
-        setModelSummary(active ? active.name : downloaded > 0 ? `${downloaded} downloaded` : 'None downloaded');
-      });
-    };
-    refresh();
-    const unsubNav = navigation.addListener('focus', refresh);
-    const unsubWdk = WdkService.subscribe(refresh);
-    return () => { unsubNav(); unsubWdk(); };
-  }, [navigation]);
+  const chooseGoal = async (mode: AppMode) => {
+    if (mode === currentMode) return;
+    if (needsSetup(currentMode, mode)) setSetupTarget(mode);
+    else {
+      await updateUser({ mode });
+      toast.show(mode === 'conceive' ? 'Trying to conceive — fertility signs added to your log' : 'Cycle tracking on');
+    }
+  };
 
-  const toggleNotif = (key: keyof NonNullable<typeof user>['notifications']) => {
-    if (!user) return;
-    updateUser({ notifications: { ...user.notifications, [key]: !user.notifications[key] } });
+  const setNotif = async (key: 'periodReminders' | 'dailyCheckIn', value: boolean) => {
+    if (value) {
+      const granted = await Reminders.requestPermission();
+      if (!granted) {
+        Alert.alert('Notifications are off', 'Allow notifications for LunaPredict in your phone settings to get reminders.');
+        return;
+      }
+    }
+    await updateUser({ notifications: { ...user.notifications, [key]: value } });
+    const count = await Reminders.reschedule({ ...user, notifications: { ...user.notifications, [key]: value } }, cycle).catch(() => 0);
+    toast.show(value ? `Reminders on (${count} scheduled)` : 'Reminder turned off', 'info');
   };
 
   const exportData = async () => {
-    const [allLogs, checkIns] = await Promise.all([Store.getLogs(), Store.getMenCheckIns()]);
-    const payload = JSON.stringify({
-      exportedAt: new Date().toISOString(),
-      user: { ...user, },
-      logs: allLogs,
-      menCheckIns: checkIns,
-    }, null, 2);
-    await Clipboard.setStringAsync(payload);
-    Alert.alert('Exported 📋', `${allLogs.length + checkIns.length} entries copied to clipboard as JSON. Paste into any file to back up.`);
+    try {
+      const data = await Store.exportAll();
+      const file = new File(Paths.cache, `lunapredict-export-${new Date().toISOString().slice(0, 10)}.json`);
+      file.create({ overwrite: true });
+      file.write(JSON.stringify(data, null, 2));
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(file.uri, { mimeType: 'application/json', dialogTitle: 'Save your LunaPredict data' });
+      } else {
+        toast.show('Sharing is not available on this device', 'error');
+      }
+    } catch (e) {
+      toast.show('Export failed', 'error');
+    }
   };
 
-  const confirmReset = () => {
-    Alert.alert(
-      'Delete all data?',
-      'This wipes your profile, logs, wallet, models and partner link from this device. There is no cloud copy — this cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete everything', style: 'destructive', onPress: resetApp },
-      ],
-    );
-  };
-
-  const about = () => {
-    Alert.alert(
-      'LunaPredict',
-      'Local-first women\'s health intelligence.\n\n• AI: QVAC MedPsy models, fully on-device\n• P2P: Pears (Holepunch) — Hyperswarm + Noise encryption\n• Payments: Tether WDK pay-per-token compute\n\nNo servers. No accounts. Your body, your data.',
-    );
+  const confirmDelete = async () => {
+    setDeleteOpen(false);
+    await resetApp({ deleteModels });
   };
 
   return (
-    <SafeAreaView style={[styles.container, { backgroundColor: themeColors.background }]}>
-      <View style={[styles.header, { backgroundColor: themeColors.card }]}>
-        <Text style={styles.headerTitle}>My <Text style={{ color: themeColors.primary }}>Profile</Text></Text>
-      </View>
+    <SafeAreaView edges={['top']} style={[styles.container, { backgroundColor: t.background }]}>
+      <ScrollView contentContainerStyle={{ padding: space.lg, paddingBottom: space.xxl }}>
+        <Text accessibilityRole="header" style={[styles.title, { color: t.text }]}>Profile</Text>
 
-      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
-        {/* User card */}
-        <Card style={{ alignItems: 'center', padding: 24 }}>
-          <View style={[styles.avatar, { backgroundColor: themeColors.primary + '15' }]}>
-            <Text style={{ fontSize: 36 }}>{isMale ? '🤝' : '🌙'}</Text>
+        <Card style={{ alignItems: 'center', paddingVertical: space.xl }}>
+          <View style={[styles.avatar, { backgroundColor: t.tint }]}>
+            <Text style={{ fontSize: 30, fontWeight: '800', color: t.primaryStrong }}>{(user.name || '?').slice(0, 1).toUpperCase()}</Text>
           </View>
-          <Text style={styles.userName}>{user?.name ?? 'Anonymous'}</Text>
-          <Text style={styles.userMeta}>
-            {isMale ? 'Partner mode' : 'Tracking since'} {user ? new Date(user.createdAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : ''}
-            {!isMale && logs.length > 0 ? ` · ${logs.length} logs` : ''}
+          <Text style={{ ...type.title, color: t.text, marginTop: space.md }}>{user.name}</Text>
+          <Text style={{ color: t.textMuted, marginTop: 4 }}>
+            {isPartner ? 'Partner mode' : `${logs.length} day${logs.length === 1 ? '' : 's'} logged`} · since {new Date(user.createdAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
           </Text>
-          <View style={styles.privacyBadge}>
-            <Text style={{ fontSize: 12, color: '#059669', fontWeight: '700' }}>🔒 All data on this device</Text>
+          <View style={{ marginTop: space.md }}>
+            <Badge label="All data stays on this phone" color={t.success} bg={t.successTint} icon={Lock} />
           </View>
         </Card>
 
-        {/* Goal switcher — women only */}
-        {!isMale && (
+        {!isPartner && (
           <>
-            <SectionLabel>Current Goal</SectionLabel>
-            <View style={{ gap: 10, marginBottom: 16 }}>
-              {modes.map((mode) => {
-                const isSelected = currentMode === mode.id;
+            <SectionLabel style={{ marginTop: space.sm }}>Your goal</SectionLabel>
+            <View accessibilityRole="radiogroup" style={{ gap: space.sm, marginBottom: space.lg }}>
+              {GOALS.map(g => {
+                const on = g.id === currentMode;
                 return (
-                  <TouchableOpacity
-                    key={mode.id}
-                    onPress={() => setMode(mode.id)}
-                    style={[styles.modeRow, isSelected && { borderColor: mode.color, backgroundColor: mode.color + '08' }]}
-                    activeOpacity={0.7}
+                  <Pressable
+                    key={g.id}
+                    testID={`goal-${g.id}`}
+                    onPress={() => chooseGoal(g.id)}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: on }}
+                    accessibilityLabel={`${g.label}. ${g.desc}`}
+                    style={({ pressed }) => [styles.goal, { backgroundColor: t.card, borderColor: on ? t.primaryStrong : t.border, opacity: pressed ? 0.85 : 1 }]}
                   >
-                    <View style={[styles.modeIcon, { backgroundColor: mode.color + '20' }]}>
-                      <Text style={{ fontSize: 24 }}>{mode.emoji}</Text>
-                    </View>
+                    <View style={[styles.goalIcon, { backgroundColor: on ? t.tint : t.surface }]}><g.icon color={on ? t.primaryStrong : t.textMuted} size={22} /></View>
                     <View style={{ flex: 1 }}>
-                      <Text style={[styles.modeLabel, isSelected && { color: mode.color }]}>{mode.label}</Text>
-                      <Text style={styles.modeDesc}>{mode.desc}</Text>
+                      <Text style={{ ...type.heading, color: on ? t.primaryStrong : t.text }}>{g.label}</Text>
+                      <Text style={{ fontSize: 13, color: t.textMuted, marginTop: 2 }}>{g.desc}</Text>
                     </View>
-                    {isSelected && (
-                      <View style={[styles.radioOuter, { borderColor: mode.color }]}>
-                        <View style={[styles.radioInner, { backgroundColor: mode.color }]} />
-                      </View>
-                    )}
-                  </TouchableOpacity>
+                    {on && <Check color={t.primaryStrong} size={22} />}
+                  </Pressable>
                 );
               })}
             </View>
           </>
         )}
 
-        {/* Partner — women manage sharing here */}
-        {!isMale && (
+        <SectionLabel>Luna (AI coach)</SectionLabel>
+        <Card>
+          <SettingsRow first icon={Brain} label="AI models" testID="profile-models"
+            value={engineKind === 'demo' ? 'Demo mode' : activeModel ? activeModel.name : 'None downloaded'}
+            onPress={() => navigation.navigate('Models')} />
+          <View style={[styles.inlineRow, { borderTopColor: t.border }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
+              <Languages color={t.textMuted} size={20} />
+              <Text style={{ ...type.label, color: t.text, fontSize: 16 }}>Luna replies in</Text>
+            </View>
+            <Segmented value={language} onChange={v => updateUser({ language: v as CoachLanguage })}
+              options={[{ value: 'en', label: 'English' }, { value: 'sw', label: 'Kiswahili' }]} />
+            {language === 'sw' && <Text style={[styles.hint, { color: t.subtext }]}>Kiswahili uses the on-device TranslatePsy model (download on AI models). Translation is machine-made — tap "Show English" on any answer.</Text>}
+          </View>
+          <SettingsRow icon={Volume2} label="Read answers aloud after voice questions"
+            toggle={{ value: user.voiceOutput === 'system', onChange: v => updateUser({ voiceOutput: v ? 'system' : 'off' }) }} />
+        </Card>
+
+        {!isPartner && (
           <>
-            <SectionLabel>Partner</SectionLabel>
+            <SectionLabel style={{ marginTop: space.sm }}>Partner</SectionLabel>
             <Card>
-              <TouchableOpacity style={styles.partnerRow} onPress={() => navigation.navigate('Partner')}>
-                <Text style={{ fontSize: 24 }}>💙</Text>
-                <View style={{ flex: 1, marginLeft: 12 }}>
-                  <Text style={styles.settingsText}>Partner sharing</Text>
-                  <Text style={styles.settingsSub}>
-                    {partnerLink?.linked
-                      ? `Linked with ${partnerLink.partnerName ?? 'partner'} · P2P encrypted`
-                      : partnerLink?.inviteCode
-                        ? 'Invite pending — waiting for partner'
-                        : 'Let your partner see what you choose'}
-                  </Text>
-                </View>
-                {partnerLink?.linked
-                  ? <Badge label="LINKED" color="#059669" bg="#ecfdf5" />
-                  : <Text style={styles.settingsArrow}>›</Text>}
-              </TouchableOpacity>
+              <SettingsRow first icon={HeartHandshake} label="Partner sharing"
+                value={partnerLink?.linked ? `Linked with ${partnerLink.partnerName ?? 'partner'}` : 'Not linked'}
+                onPress={() => navigation.navigate('Partner')} />
             </Card>
           </>
         )}
 
-        {/* AI & Compute */}
-        <SectionLabel>AI & Compute</SectionLabel>
+        <SectionLabel style={{ marginTop: space.sm }}>Reminders</SectionLabel>
         <Card>
-          <SettingsRow first emoji="🧠" label="AI Models" value={modelSummary} onPress={() => navigation.navigate('Models')} />
-          <SettingsRow emoji="👛" label="WDK Wallet" value={walletSummary} onPress={() => navigation.navigate('Wallet')} />
-          <SettingsRow
-            emoji="💻"
-            label="Pair Desktop (Tier 2)"
-            onPress={() => Alert.alert(
-              'Pair your desktop',
-              'Run the Luna Node desktop app on your computer and scan its QR code to pair over Holepunch P2P. Your phone can then delegate MedPsy-4B inference to it — private and free.',
-            )}
-          />
+          {!isPartner && (
+            <SettingsRow first icon={Bell} label="Period is coming" toggle={{ value: user.notifications.periodReminders, onChange: v => setNotif('periodReminders', v) }} />
+          )}
+          <SettingsRow first={isPartner} icon={CalendarClock} label="Daily check-in" toggle={{ value: user.notifications.dailyCheckIn, onChange: v => setNotif('dailyCheckIn', v) }} />
+          {user.notifications.dailyCheckIn && (
+            <View style={[styles.inlineRow, { borderTopColor: t.border }]}>
+              <Segmented
+                value={user.notifications.checkInTime ?? '20:00'}
+                onChange={async v => {
+                  const notifications = { ...user.notifications, checkInTime: v };
+                  await updateUser({ notifications });
+                  await Reminders.reschedule({ ...user, notifications }, cycle).catch(() => 0);
+                  toast.show(`Check-in reminder at ${v}`, 'info');
+                }}
+                options={CHECKIN_TIMES}
+              />
+            </View>
+          )}
         </Card>
 
-        {/* Notifications */}
-        <SectionLabel style={{ marginTop: 12 }}>Notifications</SectionLabel>
+        <SectionLabel style={{ marginTop: space.sm }}>Privacy & data</SectionLabel>
         <Card>
-          {([
-            ['periodReminders', '🔔 Period reminders'],
-            ['dailyCheckIn', '📝 Daily check-in nudge'],
-            ['insights', '💡 Insights'],
-          ] as const).map(([key, label], i) => (
-            <TouchableOpacity key={key} onPress={() => toggleNotif(key)} style={[styles.notifRow, i > 0 && styles.rowBorder]}>
-              <Text style={styles.settingsText}>{label}</Text>
-              <View style={[styles.toggle, user?.notifications[key] && { backgroundColor: themeColors.primary }]}>
-                <View style={[styles.toggleDot, user?.notifications[key] && styles.toggleDotOn]} />
-              </View>
-            </TouchableOpacity>
-          ))}
+          <SettingsRow first icon={Download} label="Export my data" value="JSON file" onPress={exportData} />
+          <SettingsRow icon={Trash2} label="Delete all data" danger onPress={() => setDeleteOpen(true)} testID="profile-delete" />
         </Card>
 
-        {/* Data */}
-        <SectionLabel style={{ marginTop: 12 }}>Data</SectionLabel>
+        <SectionLabel style={{ marginTop: space.sm }}>More</SectionLabel>
         <Card>
-          <SettingsRow first emoji="📤" label="Export my data (JSON)" onPress={exportData} />
-          <SettingsRow emoji="ℹ️" label="About LunaPredict" onPress={about} />
-          <SettingsRow emoji="🗑" label="Delete all data" onPress={confirmReset} danger />
+          <SettingsRow first icon={FlaskConical} label="Labs: experimental features"
+            toggle={{ value: !!user.labs, onChange: v => updateUser({ labs: v }) }} />
+          {user.labs && !isPartner && (
+            <SettingsRow icon={Wallet} label="WDK wallet (simulated)" onPress={() => navigation.navigate('Wallet')} />
+          )}
+          <SettingsRow icon={Info} label="About LunaPredict" onPress={() => Alert.alert(
+            'LunaPredict',
+            'Private cycle, fertility, pregnancy and perimenopause tracking. Predictions are computed on this phone; Luna runs QVAC MedPsy on-device.\n\nLunaPredict gives estimates for awareness. It is not a contraceptive and not a medical device. In an emergency call 999 or 112.',
+          )} />
         </Card>
-
-        {/* Powered by */}
-        <View style={styles.poweredBy}>
-          <Text style={styles.poweredByText}>Powered by</Text>
-          <Text style={[styles.poweredByBrand, { color: themeColors.primary }]}>QVAC Edge AI</Text>
-          <Text style={styles.poweredByText}>· Pears P2P · WDK</Text>
-        </View>
       </ScrollView>
+
+      <ModeSetupSheet target={setupTarget} onClose={() => setSetupTarget(null)} onDone={m => toast.show(m)} />
+
+      <Sheet visible={deleteOpen} title="Delete all data?" subtitle="This removes your profile, logs, chats, partner link and reminders from this phone. It can't be undone." onClose={() => setDeleteOpen(false)}>
+        <View style={{ gap: space.lg, paddingBottom: space.lg }}>
+          <Pressable
+            onPress={() => setDeleteModels(v => !v)}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: deleteModels }}
+            style={[styles.checkRow, { borderColor: t.border }]}
+          >
+            <Switch value={deleteModels} onValueChange={setDeleteModels} trackColor={{ true: t.danger, false: t.border }} thumbColor="#FFFFFF" />
+            <Text style={{ flex: 1, color: t.text, fontSize: 15 }}>Also delete downloaded AI models (frees storage; you'd need to download them again)</Text>
+          </Pressable>
+          <Button testID="confirm-delete" label="Delete everything" variant="danger" icon={Trash2} onPress={confirmDelete} />
+          <Button label="Cancel" variant="ghost" onPress={() => setDeleteOpen(false)} />
+        </View>
+      </Sheet>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: { paddingHorizontal: 24, paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)' },
-  headerTitle: { fontSize: 20, fontWeight: '700', color: '#1e293b' },
-  avatar: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
-  userName: { fontSize: 20, fontWeight: '700', color: '#1e293b' },
-  userMeta: { fontSize: 12, color: '#94a3b8', marginTop: 4, marginBottom: 10 },
-  privacyBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 100, backgroundColor: '#ecfdf5' },
-  modeRow: {
-    flexDirection: 'row', alignItems: 'center', padding: 16, borderRadius: 20,
-    borderWidth: 2, borderColor: '#e2e8f0', backgroundColor: '#fff',
-  },
-  modeIcon: { width: 48, height: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 14 },
-  modeLabel: { fontSize: 16, fontWeight: '700', color: '#334155' },
-  modeDesc: { fontSize: 12, color: '#94a3b8', marginTop: 2 },
-  radioOuter: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
-  radioInner: { width: 10, height: 10, borderRadius: 5 },
-  partnerRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
-  settingsText: { fontSize: 15, fontWeight: '600', color: '#334155' },
-  settingsSub: { fontSize: 12, color: '#94a3b8', marginTop: 2 },
-  settingsArrow: { fontSize: 20, color: '#94a3b8' },
-  notifRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 12 },
-  rowBorder: { borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.06)' },
-  toggle: { width: 48, height: 28, borderRadius: 14, backgroundColor: '#e2e8f0', padding: 3, justifyContent: 'center' },
-  toggleDot: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#fff' },
-  toggleDotOn: { alignSelf: 'flex-end' },
-  poweredBy: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 4, marginTop: 24, paddingBottom: 16 },
-  poweredByText: { fontSize: 12, color: '#94a3b8' },
-  poweredByBrand: { fontSize: 12, fontWeight: '700' },
+  title: { ...type.title, marginBottom: space.lg },
+  avatar: { width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center' },
+  goal: { flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.lg, borderRadius: radius.lg, borderWidth: 2, minHeight: 72 },
+  goalIcon: { width: 44, height: 44, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
+  inlineRow: { paddingVertical: space.md, borderTopWidth: StyleSheet.hairlineWidth },
+  hint: { fontSize: 13, lineHeight: 18, marginTop: space.sm },
+  checkRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, borderWidth: 1, borderRadius: radius.md, padding: space.md },
 });
