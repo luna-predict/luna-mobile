@@ -1,169 +1,120 @@
 import * as Device from 'expo-device';
+import { File, Paths } from 'expo-file-system';
 import { ModelInfo, ModelRegistryEntry, ModelDownloadState } from '../types';
 import { Store } from '../storage/Store';
+import { MODEL_CATALOG, catalogEntry, formatBytes } from '../ai/catalog';
+import { getQvac, registryModel, errorMessage } from '../ai/qvac';
 
-const GB = 1024 * 1024 * 1024;
-const MB = 1024 * 1024;
+export { MODEL_CATALOG, formatBytes };
 
 /**
- * QVAC model catalog for LunaPredict.
- * Sizes/RAM requirements follow the QVAC model guide (GGUF Q4 quantization).
- * Download is simulated at realistic pace; production swaps `startDownload`
- * for @qvac/sdk loadModel({ onProgress }) which streams from the QVAC registry.
+ * Real model downloads through the QVAC SDK registry (checksum-verified).
+ * Lifecycle: not_downloaded → downloading → (paused) → downloaded | error.
+ * See docs/archi-docs/04-local-ai-qvac.md §4.3.
  */
-export const MODEL_CATALOG: ModelInfo[] = [
-  {
-    id: 'medpsy-1.7b-gguf',
-    name: 'MedPsy 1.7B',
-    family: 'QVAC MedPsy',
-    category: 'llm',
-    parameters: '1.7B',
-    quantization: 'Q4_0 GGUF',
-    sizeBytes: 1.1 * GB,
-    minRamBytes: 2 * GB,
-    description: 'Tether\'s medical foundation model. Beats MedGemma 4B across 7 medical benchmarks at half the size. The default Luna coach brain.',
-    capabilities: ['Health chat', 'Cycle insights', 'Symptom triage', 'Clinical reasoning'],
-  },
-  {
-    id: 'medpsy-4b-gguf',
-    name: 'MedPsy 4B',
-    family: 'QVAC MedPsy',
-    category: 'llm',
-    parameters: '4B',
-    quantization: 'Q4_K_M GGUF',
-    sizeBytes: 2.4 * GB,
-    minRamBytes: 3.5 * GB,
-    description: 'Deeper clinical reasoning — outperforms MedGemma 27B despite being 7x smaller. For flagship phones, or via P2P delegation to your desktop.',
-    capabilities: ['Deep health insights', 'Multi-symptom analysis', 'Long-context RAG'],
-  },
-  {
-    id: 'whisper-small',
-    name: 'Whisper Small',
-    family: 'OpenAI Whisper',
-    category: 'speech',
-    parameters: '244M',
-    quantization: 'GGML',
-    sizeBytes: 466 * MB,
-    minRamBytes: 1 * GB,
-    description: 'On-device speech-to-text. Powers voice logging: "Luna, log day 14, mild cramps" — audio never leaves your phone.',
-    capabilities: ['Voice logging', 'Transcription'],
-  },
-  {
-    id: 'llama-3.2-1b',
-    name: 'Llama 3.2 1B',
-    family: 'Meta Llama',
-    category: 'llm',
-    parameters: '1B',
-    quantization: 'Q4_0 GGUF',
-    sizeBytes: 0.7 * GB,
-    minRamBytes: 1.5 * GB,
-    description: 'Ultra-light general chat fallback for low-RAM devices. Fast, but without MedPsy\'s medical depth.',
-    capabilities: ['General chat', 'Quick answers'],
-  },
-  {
-    id: 'bergamot-nmt',
-    name: 'Bergamot NMT',
-    family: 'Bergamot',
-    category: 'translation',
-    parameters: '—',
-    quantization: 'ONNX',
-    sizeBytes: 120 * MB,
-    minRamBytes: 0.5 * GB,
-    description: 'Offline neural translation between 30+ languages, for using Luna in your language.',
-    capabilities: ['Offline translation'],
-  },
-];
 
 export interface DeviceCapability {
   deviceName: string;
   modelName: string;
-  osName: string;
-  osVersion: string;
   totalRamBytes: number | null;
+  freeDiskBytes: number | null;
   isPhysicalDevice: boolean;
-  /** Which catalog models this device can run locally */
-  runnableModelIds: string[];
-  recommendedModelId: string | null;
 }
 
 export function getDeviceCapability(): DeviceCapability {
-  const totalRam = Device.totalMemory; // bytes, null on web
-  const runnable = MODEL_CATALOG
-    .filter(m => totalRam == null || totalRam >= m.minRamBytes)
-    .map(m => m.id);
-
-  // Recommend the strongest MedPsy the device can hold with headroom
-  let recommended: string | null = null;
-  if (totalRam != null && totalRam >= 5 * GB) recommended = 'medpsy-4b-gguf';
-  else if (totalRam == null || totalRam >= 2 * GB) recommended = 'medpsy-1.7b-gguf';
-  else recommended = 'llama-3.2-1b';
-
+  let freeDisk: number | null = null;
+  try { freeDisk = Paths.availableDiskSpace; } catch { freeDisk = null; }
   return {
-    deviceName: Device.deviceName ?? 'This device',
+    deviceName: Device.deviceName ?? 'This phone',
     modelName: Device.modelName ?? 'Unknown model',
-    osName: Device.osName ?? 'Unknown OS',
-    osVersion: Device.osVersion ?? '',
-    totalRamBytes: totalRam,
+    totalRamBytes: Device.totalMemory ?? null,
+    freeDiskBytes: freeDisk,
     isPhysicalDevice: Device.isDevice,
-    runnableModelIds: runnable,
-    recommendedModelId: recommended,
   };
 }
 
-export function formatBytes(bytes: number | null): string {
-  if (bytes == null) return '—';
-  if (bytes >= GB) return `${(bytes / GB).toFixed(1)} GB`;
-  return `${Math.round(bytes / MB)} MB`;
-}
+export type FitVerdict = 'likely-fits' | 'likely-too-large' | 'unknown';
 
-type ProgressListener = (modelId: string, state: ModelDownloadState) => void;
+type Listener = (modelId: string, state: ModelDownloadState) => void;
 
-/**
- * Download manager with persisted registry. Singleton so downloads survive
- * screen unmounts (they run on the JS timer loop while the app is foregrounded).
- */
 class ModelManagerImpl {
   private registry: ModelRegistryEntry[] = [];
-  private listeners = new Set<ProgressListener>();
-  private timers = new Map<string, ReturnType<typeof setInterval>>();
+  private listeners = new Set<Listener>();
+  private requests = new Map<string, string>();      // modelId → SDK requestId
+  private pausing = new Set<string>();
+  private lastEmit = new Map<string, number>();
   private loaded = false;
 
   async init(): Promise<ModelRegistryEntry[]> {
-    if (!this.loaded) {
-      this.registry = await Store.getModelRegistry();
-      // Downloads interrupted by an app restart reset to not_downloaded
-      let dirty = false;
-      for (const entry of this.registry) {
-        if (entry.state.status === 'downloading') {
-          entry.state = { status: 'not_downloaded' };
-          dirty = true;
-        }
-      }
-      if (dirty) await Store.saveModelRegistry(this.registry);
-      this.loaded = true;
+    if (this.loaded) return this.registry;
+    this.registry = (await Store.getModelRegistry()).filter(e => catalogEntry(e.modelId));
+    for (const e of this.registry) {
+      // A download interrupted by an app restart resumes from where it stopped
+      if (e.state.status === 'downloading') e.state = { status: 'paused', progress: e.state.progress };
     }
+    this.loaded = true;
+    await this.reconcileWithCache();
+    await this.persist();
     return this.registry;
+  }
+
+  /** Trust the SDK cache over our registry (files may have been cleared by the OS or a reinstall). */
+  private async reconcileWithCache() {
+    const sdk = getQvac();
+    if (!sdk) return;
+    for (const model of MODEL_CATALOG) {
+      try {
+        const info = await sdk.getModelInfo(registryModel(sdk, model.sdkConstant) as never);
+        const entry = this.getEntry(model.id);
+        if (info.isCached && entry?.state.status !== 'downloaded') {
+          this.setState(model.id, { status: 'downloaded', downloadedAt: new Date().toISOString() });
+        } else if (!info.isCached && entry?.state.status === 'downloaded') {
+          this.setState(model.id, { status: 'not_downloaded' });
+        }
+      } catch {
+        // registry unreachable or constant missing — keep what we have
+      }
+    }
+    this.ensureActiveCoach();
   }
 
   getEntry(modelId: string): ModelRegistryEntry | undefined {
     return this.registry.find(e => e.modelId === modelId);
   }
 
+  stateFor(modelId: string): ModelDownloadState {
+    return this.getEntry(modelId)?.state ?? { status: 'not_downloaded' };
+  }
+
+  isDownloaded(modelId: string): boolean {
+    return this.stateFor(modelId).status === 'downloaded';
+  }
+
+  /** The LLM that answers in the Coach. */
   getActiveModel(): ModelInfo | null {
     const active = this.registry.find(e => e.active && e.state.status === 'downloaded');
-    return active ? MODEL_CATALOG.find(m => m.id === active.modelId) ?? null : null;
+    return active ? catalogEntry(active.modelId) ?? null : null;
   }
 
-  subscribe(fn: ProgressListener): () => void {
+  /** First downloaded model for a supporting role (translator / asr). */
+  getModelForRole(role: ModelInfo['role']): ModelInfo | null {
+    return MODEL_CATALOG.find(m => m.role === role && this.isDownloaded(m.id)) ?? null;
+  }
+
+  subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
-    return () => this.listeners.delete(fn);
+    return () => { this.listeners.delete(fn); };
   }
 
-  private emit(modelId: string, state: ModelDownloadState) {
+  private emit(modelId: string, state: ModelDownloadState, force = false) {
+    // Progress events can arrive many times a second; throttle UI updates to ~5/s
+    const now = Date.now();
+    if (!force && now - (this.lastEmit.get(modelId) ?? 0) < 200) return;
+    this.lastEmit.set(modelId, now);
     this.listeners.forEach(fn => fn(modelId, state));
   }
 
-  private async upsert(modelId: string, state: ModelDownloadState, active?: boolean) {
+  private setState(modelId: string, state: ModelDownloadState, active?: boolean) {
     let entry = this.getEntry(modelId);
     if (!entry) {
       entry = { modelId, state, active: active ?? false };
@@ -172,71 +123,161 @@ class ModelManagerImpl {
       entry.state = state;
       if (active !== undefined) entry.active = active;
     }
+  }
+
+  private async update(modelId: string, state: ModelDownloadState, active?: boolean) {
+    this.setState(modelId, state, active);
+    const final = state.status !== 'downloading';
+    if (final) await this.persist();
+    this.emit(modelId, state, final);
+  }
+
+  async persist(): Promise<void> {
     await Store.saveModelRegistry(this.registry);
-    this.emit(modelId, state);
   }
 
-  /**
-   * Begin downloading a model from the QVAC distributed registry.
-   * Simulated at ~40 MB/s of "progress"; production: @qvac/sdk loadModel onProgress.
-   */
-  async startDownload(modelId: string): Promise<void> {
-    const model = MODEL_CATALOG.find(m => m.id === modelId);
-    if (!model) throw new Error(`Unknown model ${modelId}`);
-    const existing = this.getEntry(modelId);
-    if (existing?.state.status === 'downloading' || existing?.state.status === 'downloaded') return;
-
-    console.log(`[QVAC] Fetching ${model.name} from distributed model registry...`);
-    await this.upsert(modelId, { status: 'downloading', progress: 0 });
-
-    const tickMs = 300;
-    const bytesPerTick = 40 * MB * (tickMs / 1000);
-    let downloaded = 0;
-
-    const timer = setInterval(async () => {
-      downloaded += bytesPerTick * (0.7 + Math.random() * 0.6); // jitter like a real network
-      const progress = Math.min(1, downloaded / model.sizeBytes);
-      if (progress >= 1) {
-        clearInterval(timer);
-        this.timers.delete(modelId);
-        const noActive = !this.registry.some(e => e.active && e.state.status === 'downloaded');
-        await this.upsert(modelId, {
-          status: 'downloaded',
-          downloadedAt: new Date().toISOString(),
-          path: `qvac://models/${modelId}`,
-        }, noActive && model.category === 'llm' ? true : undefined);
-        console.log(`[QVAC] ${model.name} ready at qvac://models/${modelId}`);
-      } else {
-        await this.upsert(modelId, { status: 'downloading', progress });
-      }
-    }, tickMs);
-    this.timers.set(modelId, timer);
+  private ensureActiveCoach() {
+    if (this.getActiveModel()) return;
+    for (const e of this.registry) e.active = false;
+    const firstCoach = MODEL_CATALOG.find(m => (m.role === 'coach' || m.role === 'coach-light') && this.isDownloaded(m.id));
+    if (firstCoach) this.getEntry(firstCoach.id)!.active = true;
   }
 
-  async cancelDownload(modelId: string): Promise<void> {
-    const timer = this.timers.get(modelId);
-    if (timer) {
-      clearInterval(timer);
-      this.timers.delete(modelId);
+  /** Ask the SDK whether this model should fit in memory (without downloading anything). */
+  async assessFit(modelId: string, ctxSize = 2048): Promise<FitVerdict> {
+    const sdk = getQvac();
+    const model = catalogEntry(modelId);
+    if (!sdk || !model) return 'unknown';
+    try {
+      const result = await sdk.assessModelFit({
+        models: [{ modelSrc: registryModel(sdk, model.sdkConstant), modelType: model.sdkModelType, modelConfig: model.sdkModelType === 'llamacpp-completion' ? { ctx_size: ctxSize } : {} }],
+        execution: 'sequential',
+        policy: 'interactive-v1',
+      } as never);
+      const r = result as unknown as { verdict?: string; models?: { verdict?: string }[] };
+      const verdict = r.models?.[0]?.verdict ?? r.verdict;
+      return verdict === 'likely-fits' || verdict === 'likely-too-large' ? verdict : 'unknown';
+    } catch {
+      return 'unknown';
     }
-    await this.upsert(modelId, { status: 'not_downloaded' });
+  }
+
+  /** Download (or resume) a model. Resolves when finished, paused or failed. */
+  async startDownload(modelId: string): Promise<void> {
+    const model = catalogEntry(modelId);
+    if (!model) throw new Error(`Unknown model ${modelId}`);
+    const sdk = getQvac();
+    if (!sdk) throw new Error('On-device AI needs the LunaPredict app build (not Expo Go).');
+    const current = this.stateFor(modelId);
+    if (current.status === 'downloading' || current.status === 'downloaded') return;
+
+    const startProgress = current.status === 'paused' ? current.progress : 0;
+    await this.update(modelId, { status: 'downloading', progress: startProgress });
+
+    try {
+      const run = sdk.downloadAsset({
+        assetSrc: registryModel(sdk, model.sdkConstant),
+        onProgress: (p: { percentage: number; downloaded: number; total: number }) => {
+          this.update(modelId, {
+            status: 'downloading',
+            progress: Math.min(1, Math.max(0, p.percentage / 100)),
+            downloadedBytes: p.downloaded,
+            totalBytes: p.total,
+          });
+        },
+      } as never);
+      this.requests.set(modelId, (run as unknown as { requestId: string }).requestId);
+      await run;
+      this.requests.delete(modelId);
+      const noActiveCoach = !this.getActiveModel();
+      const isCoach = model.role === 'coach' || model.role === 'coach-light';
+      await this.update(modelId, { status: 'downloaded', downloadedAt: new Date().toISOString() }, isCoach && noActiveCoach ? true : undefined);
+    } catch (e) {
+      this.requests.delete(modelId);
+      const progress = (this.stateFor(modelId) as { progress?: number }).progress ?? 0;
+      if (this.pausing.delete(modelId)) {
+        await this.update(modelId, { status: 'paused', progress });
+      } else {
+        await this.update(modelId, { status: 'error', message: friendlyDownloadError(e) });
+      }
+    }
+  }
+
+  /** Pause keeps the partial file so Resume continues where it stopped. */
+  async pauseDownload(modelId: string): Promise<void> {
+    const requestId = this.requests.get(modelId);
+    const sdk = getQvac();
+    if (!requestId || !sdk) return;
+    this.pausing.add(modelId);
+    await sdk.cancel({ requestId } as never);
+  }
+
+  /** Stop and throw away the partial file. */
+  async cancelDownload(modelId: string): Promise<void> {
+    const requestId = this.requests.get(modelId);
+    const sdk = getQvac();
+    if (requestId && sdk) {
+      this.pausing.add(modelId);
+      await sdk.cancel({ requestId, clearCache: true } as never).catch(() => {});
+    }
+    await this.deleteFiles(modelId);
+    await this.update(modelId, { status: 'not_downloaded' }, false);
   }
 
   async deleteModel(modelId: string): Promise<void> {
-    await this.cancelDownload(modelId);
-    await this.upsert(modelId, { status: 'not_downloaded' }, false);
-    console.log(`[QVAC] Unloaded and removed ${modelId} from device storage.`);
+    const { coachEngine } = await import('../ai/engine');
+    await coachEngine.unloadModel(modelId).catch(() => {});
+    await this.deleteFiles(modelId);
+    await this.update(modelId, { status: 'not_downloaded' }, false);
+    this.ensureActiveCoach();
+    await this.persist();
+    this.emit(modelId, { status: 'not_downloaded' }, true);
   }
 
-  /** Mark a downloaded LLM as the active local coach brain */
-  async setActive(modelId: string): Promise<void> {
-    for (const entry of this.registry) {
-      entry.active = entry.modelId === modelId && entry.state.status === 'downloaded';
+  private async deleteFiles(modelId: string) {
+    const sdk = getQvac();
+    const model = catalogEntry(modelId);
+    if (!sdk || !model) return;
+    try {
+      const info = await sdk.getModelInfo(registryModel(sdk, model.sdkConstant) as never) as unknown as { cacheFiles?: { path: string }[] };
+      for (const f of info.cacheFiles ?? []) {
+        try {
+          const file = new File(f.path.startsWith('file://') ? f.path : `file://${f.path}`);
+          if (file.exists) file.delete();
+        } catch {
+          // already gone
+        }
+      }
+    } catch {
+      // nothing cached
     }
-    await Store.saveModelRegistry(this.registry);
-    const entry = this.getEntry(modelId);
-    if (entry) this.emit(modelId, entry.state);
   }
+
+  /** Mark a downloaded LLM as the Coach's model. */
+  async setActive(modelId: string): Promise<void> {
+    const model = catalogEntry(modelId);
+    if (!model || (model.role !== 'coach' && model.role !== 'coach-light') || !this.isDownloaded(modelId)) return;
+    for (const e of this.registry) e.active = e.modelId === modelId;
+    await this.persist();
+    this.emit(modelId, this.stateFor(modelId), true);
+  }
+
+  /** Delete all data: forget registry; optionally remove model files too. */
+  async reset({ deleteFiles }: { deleteFiles: boolean }): Promise<void> {
+    if (deleteFiles) {
+      for (const m of MODEL_CATALOG) await this.deleteFiles(m.id);
+      this.registry = [];
+    }
+    this.requests.clear();
+  }
+}
+
+function friendlyDownloadError(e: unknown): string {
+  const msg = errorMessage(e).toLowerCase();
+  if (msg.includes('network') || msg.includes('fetch') || msg.includes('timeout') || msg.includes('connect')) return 'No connection — tap Resume when you are back online.';
+  if (msg.includes('space') || msg.includes('enospc')) return 'Not enough free storage.';
+  if (msg.includes('checksum') || msg.includes('sha')) return 'Download was corrupted. Try again.';
+  return errorMessage(e);
 }
 
 export const ModelManager = new ModelManagerImpl();

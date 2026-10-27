@@ -1,385 +1,399 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, ScrollView,
-  ActivityIndicator, KeyboardAvoidingView, Platform, StyleSheet, Alert,
+  View, Text, TextInput, FlatList, KeyboardAvoidingView, Platform, StyleSheet, Alert, Pressable, Linking, ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, NavigationProp } from '@react-navigation/native';
+import { Moon, ArrowUp, Square, Volume2, Trash2, Download, Languages, Phone, Cpu } from 'lucide-react-native';
 import { useApp } from '../context/AppContext';
-import { AppMode, ChatMessage, SharedSnapshot } from '../types';
-import { LocalInference } from '../ai/LocalInference';
-import { DelegatedInference, DelegationTarget } from '../ai/DelegatedInference';
-import { LocalRagEngine } from '../ai/LocalRagEngine';
-import { composePartnerReply } from '../ai/InsightComposer';
-import { WdkService } from '../services/WdkService';
-import { PearsPartnerService } from '../services/PearsPartnerService';
+import { AppMode, ChatMessage, CoachLanguage } from '../types';
 import { Store } from '../storage/Store';
+import { ask, CoachRun, CoachStage } from '../ai/coach/CoachService';
+import { coachEngine } from '../ai/engine';
+import { ModelManager } from '../services/ModelManager';
+import { PearsPartnerService } from '../services/PearsPartnerService';
+import { useModelRegistryVersion } from '../ai/useModels';
+import { speak, stopSpeaking } from '../ai/voice/speak';
 import { RootStackParamList } from '../navigation/AppNavigator';
+import { Banner, FlagBanner, IconButton, EmptyState, space, type, radius } from '../ui';
+import { MicButton } from '../ui/MicButton';
+import { useToast } from '../ui/Toast';
 
-const MODE_CONFIG: Record<AppMode, { greeting: string; prompts: string[]; persona: string; icon: string }> = {
+const GREETING: Record<AppMode | 'partner', Record<CoachLanguage, string>> = {
   period: {
-    greeting: "Hi! I'm Luna, your private cycle companion 🌙\n\nEverything we discuss stays on your phone. How can I help?",
-    prompts: ['Why am I so tired?', 'What helps with cramps?', 'When am I most fertile?', 'Why is my mood changing?'],
-    persona: 'Cycle Coach',
-    icon: '🌸',
+    en: "Hi, I'm Luna — your private cycle companion. Everything we discuss stays on this phone. What's on your mind?",
+    sw: 'Habari, mimi ni Luna — msaidizi wako wa siri wa mzunguko wa hedhi. Tunachozungumza kinabaki kwenye simu hii. Nikusaidie nini?',
   },
   conceive: {
-    greeting: "Hey there! I'm Luna, your fertility guide 🥚✨\n\nWhat would you like to know?",
-    prompts: ['Best time to conceive?', 'What is BBT tracking?', 'How to read OPK tests?', 'Tips to improve fertility'],
-    persona: 'Fertility Guide',
-    icon: '🥚',
+    en: "Hi, I'm Luna — your fertility guide. I can explain your fertile window, ovulation tests and temperature charts.",
+    sw: 'Habari, mimi ni Luna — mwongozo wako wa uzazi. Naweza kueleza siku zako za rutuba na vipimo vya ovulesheni.',
   },
   pregnancy: {
-    greeting: "Hello, mama! I'm Luna 🤰💕\n\nHow can I support you today?",
-    prompts: ["What's happening this week?", 'Safe exercises for me?', 'Foods to avoid?', 'When to call my doctor?'],
-    persona: 'Pregnancy Support',
-    icon: '🤰',
+    en: "Hello! I'm Luna. Ask me about this week of your pregnancy, symptoms, or when to call your midwife.",
+    sw: 'Habari! Mimi ni Luna. Niulize kuhusu wiki hii ya ujauzito wako, dalili, au wakati wa kumpigia mkunga.',
   },
   perimenopause: {
-    greeting: "Hi there! I'm Luna 🦋\n\nI'm here to support you through this transition. What's on your mind?",
-    prompts: ['Managing hot flashes', 'Sleep better at night', 'Mood swing tips', 'Should I see a doctor?'],
-    persona: 'Midlife Wellness',
-    icon: '🦋',
+    en: "Hi, I'm Luna. I'm here to help with hot flashes, sleep, mood and the changes of this transition.",
+    sw: 'Habari, mimi ni Luna. Niko hapa kukusaidia na joto la ghafla, usingizi, hisia na mabadiliko haya.',
+  },
+  partner: {
+    en: "Hey, I'm Luna. I help you understand and support your partner — I only see what she chooses to share.",
+    sw: 'Habari, mimi ni Luna. Nakusaidia kumwelewa na kumsaidia mwenzako — naona tu kile anachochagua kushiriki.',
   },
 };
 
-const MEN_CONFIG = {
-  greeting: "Hey! I'm Luna 🤝\n\nI help you understand and support your partner — I only see what she shares. I've also got your back on your own wellness. What's up?",
-  prompts: ['How can I support her today?', 'Why might she feel off?', 'Good time to plan a date?', 'Tips for my own stress'],
-  persona: 'Partner Coach',
-  icon: '🤝',
+const PROMPTS: Record<AppMode | 'partner', Record<CoachLanguage, string[]>> = {
+  period: { en: ['Why am I so tired?', 'What helps with cramps?', 'When is my next period?', 'Why is my mood changing?'], sw: ['Kwa nini nimechoka sana?', 'Nini husaidia maumivu ya tumbo?', 'Hedhi yangu ijayo ni lini?'] },
+  conceive: { en: ['When am I most fertile?', 'How do I read ovulation tests?', 'What is BBT tracking?', 'Tips to improve fertility'], sw: ['Siku zangu za rutuba ni lini?', 'Nasomaje kipimo cha ovulesheni?'] },
+  pregnancy: { en: ["What's happening this week?", 'Safe exercises for me?', 'Foods to avoid?', 'When should I call my midwife?'], sw: ['Nini kinatokea wiki hii?', 'Vyakula gani niepuke?'] },
+  perimenopause: { en: ['Managing hot flashes', 'Sleep better at night', 'Mood swing tips', 'Should I see a doctor?'], sw: ['Jinsi ya kudhibiti joto la ghafla', 'Kulala vizuri usiku'] },
+  partner: { en: ['How can I support her today?', 'Why might she feel off?', 'Good time to plan a date?', 'Tips for my own stress'], sw: ['Nimsaidieje leo?', 'Vidokezo vya msongo wangu'] },
 };
+
+const STAGE_TEXT: Record<CoachStage, string> = {
+  translating_in: 'Translating your question…',
+  loading: 'Loading the model into memory (first message only)…',
+  thinking: 'Thinking',
+  answering: '',
+  translating_out: 'Translating the answer…',
+};
+
+const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
 export default function AICoachScreen() {
   const navigation = useNavigation<NavigationProp<RootStackParamList>>();
-  const { themeColors, currentMode, user, cycle, logs } = useApp();
-  const isMale = user?.sex === 'male';
-  const config = isMale ? MEN_CONFIG : MODE_CONFIG[currentMode];
+  const toast = useToast();
+  const app = useApp();
+  const { themeColors: t, currentMode, user, cycle, pregnancy, peri, logs, flags, today, updateUser } = app;
+  const isPartner = user?.sex === 'male';
+  const persona: AppMode | 'partner' = isPartner ? 'partner' : currentMode;
+  const language: CoachLanguage = user?.language ?? 'en';
+  useModelRegistryVersion();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
-  const [tier, setTier] = useState<'local' | 'p2p'>('local');
-  const [p2pTarget, setP2pTarget] = useState<DelegationTarget>('desktop');
-  const [showTierSheet, setShowTierSheet] = useState(false);
-  const [localModelName, setLocalModelName] = useState<string | null>(null);
-  const [modelLoading, setModelLoading] = useState(false);
-  const [wdkBalance, setWdkBalance] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState<CoachStage | null>(null);
+  const [streamText, setStreamText] = useState('');
+  const [thinkingSince, setThinkingSince] = useState<number | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const [showOriginal, setShowOriginal] = useState<Record<string, boolean>>({});
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const runRef = useRef<CoachRun | null>(null);
+  const listRef = useRef<FlatList<ChatMessage>>(null);
+  const pendingText = useRef('');
+  const flushTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastQuestionByVoice = useRef(false);
 
-  const delegatedRef = useRef<DelegatedInference | null>(null);
-  const scrollRef = useRef<ScrollView>(null);
+  const engineKind = coachEngine.kind();
+  const activeModel = ModelManager.getActiveModel();
+  const hasTranslator = !!ModelManager.getModelForRole('translator');
+  const needsModel = engineKind === 'qvac' && !activeModel;
 
-  // Hydrate chat + wallet + model availability
+  const greeting = useCallback((): ChatMessage => (
+    { id: 'greeting', role: 'assistant', content: GREETING[persona][language], status: 'done', language }
+  ), [persona, language]);
+
+  // Hydrate chat
   useEffect(() => {
-    delegatedRef.current = new DelegatedInference();
-    Store.getChatHistory().then(history => {
-      setMessages(history.length > 0 ? history : [{ role: 'assistant', content: config.greeting }]);
-    });
-    WdkService.init().then(s => setWdkBalance(s ? s.balanceUsdt.toFixed(4) : null));
-    const unsub = WdkService.subscribe(s => setWdkBalance(s.balanceUsdt.toFixed(4)));
-    LocalInference.isAvailable().then(ok => setLocalModelName(ok ? LocalInference.getActiveModelName() : null));
-    return unsub;
+    Store.getChatHistory().then(h => setMessages(h.length ? h.map(m => ({ ...m, id: m.id ?? newId() })) : [greeting()]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Refresh model availability when returning from the Models screen
+  // New persona when the goal or language changes (stop anything in flight)
+  const personaKey = `${persona}:${language}`;
+  const prevPersona = useRef(personaKey);
   useEffect(() => {
-    const unsubscribe = navigation.addListener('focus', () => {
-      LocalInference.isAvailable().then(ok => setLocalModelName(ok ? LocalInference.getActiveModelName() : null));
-    });
-    return unsubscribe;
-  }, [navigation]);
+    if (prevPersona.current === personaKey) return;
+    prevPersona.current = personaKey;
+    runRef.current?.cancel();
+    stopSpeaking();
+    const fresh = [greeting()];
+    setMessages(fresh);
+    Store.saveChatHistory(fresh);
+  }, [personaKey, greeting]);
 
-  // Reset greeting when women switch modes (fresh persona, keep nothing stale)
-  const prevModeRef = useRef(currentMode);
+  // Elapsed-time ticker while thinking
   useEffect(() => {
-    if (!isMale && prevModeRef.current !== currentMode) {
-      prevModeRef.current = currentMode;
-      const fresh: ChatMessage[] = [{ role: 'assistant', content: MODE_CONFIG[currentMode].greeting }];
-      setMessages(fresh);
-      Store.saveChatHistory(fresh);
-    }
-  }, [currentMode, isMale]);
+    if (!thinkingSince) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [thinkingSince]);
+
+  useEffect(() => () => { runRef.current?.cancel(); stopSpeaking(); }, []);
 
   const persist = useCallback((msgs: ChatMessage[]) => {
     setMessages(msgs);
-    Store.saveChatHistory(msgs);
+    Store.saveChatHistory(msgs.filter(m => m.id !== 'greeting' || msgs.length === 1));
   }, []);
 
-  const streamIntoLastMessage = (partial: string) => {
-    setMessages(prev => {
-      const updated = [...prev];
-      updated[updated.length - 1] = { ...updated[updated.length - 1], content: partial };
-      return updated;
-    });
-  };
-
-  const sendMessage = async (text?: string) => {
-    const msg = (text ?? input).trim();
-    if (!msg || isTyping) return;
-
-    const base: ChatMessage[] = [...messages, { role: 'user', content: msg, timestamp: new Date().toISOString() }];
+  const send = useCallback(async (raw?: string) => {
+    const text = (raw ?? input).trim();
+    if (!text || busy || !user) return;
+    stopSpeaking();
+    const userMsg: ChatMessage = { id: newId(), role: 'user', content: text, timestamp: new Date().toISOString(), language };
+    const history = messages.filter(m => m.id !== 'greeting');
+    const base = [...messages, userMsg];
     persist(base);
     setInput('');
-    setIsTyping(true);
+    setBusy(true);
+    setStage(null);
+    setStreamText('');
+    pendingText.current = '';
 
-    try {
-      // ── Men side: partner coach, always instant + local ──
-      if (isMale) {
-        const snap: SharedSnapshot | null = await PearsPartnerService.fetchSnapshot();
-        await new Promise(r => setTimeout(r, 900));
-        const reply = composePartnerReply(msg, snap?.phase, snap?.sharerName ?? 'your partner');
-        setIsTyping(false);
-        persist([...base, { role: 'assistant', content: reply, tier: 'local', timestamp: new Date().toISOString() }]);
-        return;
-      }
+    // Throttle streaming re-renders to ~20/s
+    flushTimer.current = setInterval(() => setStreamText(pendingText.current), 50);
 
-      // ── Women side ──
-      const relevantLogs = await LocalRagEngine.retrieveRelevantLogs(msg);
+    const partnerData = isPartner
+      ? { snapshot: await PearsPartnerService.fetchSnapshot(), checkIns: await Store.getMenCheckIns(), today }
+      : undefined;
 
-      if (tier === 'local') {
-        const available = await LocalInference.isAvailable();
-        if (!available) {
-          setIsTyping(false);
-          Alert.alert(
-            'No local model yet',
-            'Download MedPsy 1.7B from the Models page to chat fully offline — or switch the Coach to P2P mode.',
-            [
-              { text: 'Use P2P instead', onPress: () => setTier('p2p') },
-              { text: 'Open Models', onPress: () => navigation.navigate('Models') },
-            ],
-          );
-          persist(base.slice(0, -1)); // put the message back in the input
-          setInput(msg);
-          return;
-        }
-        setModelLoading(true);
-        await LocalInference.initializeModel();
-        setModelLoading(false);
-        setIsTyping(false);
-        persist([...base, { role: 'assistant', content: '', tier: 'local', timestamp: new Date().toISOString() }]);
-        const reply = await LocalInference.generateInsight({
-          question: msg,
-          mode: currentMode,
-          cycle,
-          recentLogs: relevantLogs,
-          onToken: streamIntoLastMessage,
-        });
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { ...updated[updated.length - 1], content: reply };
-          Store.saveChatHistory(updated);
-          return updated;
-        });
-      } else {
-        // P2P — public network needs a funded wallet
-        if (p2pTarget === 'network') {
-          const wallet = WdkService.getState();
-          if (!wallet?.initialized) {
-            setIsTyping(false);
-            Alert.alert(
-              'Wallet needed',
-              'Public compute nodes are paid per token. Set up your WDK wallet first, or delegate to your own paired desktop for free.',
-              [
-                { text: 'Use my desktop', onPress: () => setP2pTarget('desktop') },
-                { text: 'Open Wallet', onPress: () => navigation.navigate('Wallet') },
-              ],
-            );
-            persist(base.slice(0, -1));
-            setInput(msg);
-            return;
-          }
-        }
-        setIsTyping(false);
-        persist([...base, { role: 'assistant', content: '', tier: 'p2p', timestamp: new Date().toISOString() }]);
-        const reply = await delegatedRef.current!.runDelegatedInference({
-          question: msg,
-          mode: currentMode,
-          cycle,
-          recentLogs: relevantLogs,
-          target: p2pTarget,
-          onToken: streamIntoLastMessage,
-        });
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { ...updated[updated.length - 1], content: reply };
-          Store.saveChatHistory(updated);
-          return updated;
-        });
-      }
-    } catch (e) {
-      console.error('[Coach] inference failed', e);
-      setIsTyping(false);
-      setModelLoading(false);
-      persist([...base, { role: 'assistant', content: 'Sorry, I hit a snag running inference. Please try again.', timestamp: new Date().toISOString() }]);
+    const run = ask({
+      question: text,
+      language,
+      history,
+      flags,
+      userName: user.name,
+      woman: isPartner ? undefined : { user, today, cycle, pregnancy, peri, flags, logs },
+      partner: partnerData,
+    }, {
+      onStage: s => {
+        setStage(s);
+        setThinkingSince(s === 'thinking' ? Date.now() : null);
+      },
+      onText: full => { pendingText.current = full; },
+    });
+    runRef.current = run;
+    const reply = await run.done;
+    runRef.current = null;
+    if (flushTimer.current) clearInterval(flushTimer.current);
+    setBusy(false);
+    setStage(null);
+    setThinkingSince(null);
+    setStreamText('');
+
+    const final = reply.status === 'stopped' && !reply.content.trim()
+      ? { ...reply, content: pendingText.current || '(stopped)' }
+      : reply;
+    persist([...base, final]);
+    requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
+
+    if (lastQuestionByVoice.current && user.voiceOutput === 'system' && final.content && final.status !== 'error') {
+      setSpeakingId(final.id ?? null);
+      speak(final.content, final.language ?? 'en', () => setSpeakingId(null));
     }
-  };
+    lastQuestionByVoice.current = false;
+  }, [input, busy, user, messages, persist, isPartner, today, language, flags, cycle, pregnancy, peri, logs]);
+
+  const stop = () => runRef.current?.cancel();
 
   const clearChat = () => {
-    Alert.alert('Clear conversation?', 'Chat history is stored only on this device.', [
+    Alert.alert('Clear conversation?', 'Your chat is stored only on this phone.', [
       { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear', style: 'destructive',
-        onPress: () => persist([{ role: 'assistant', content: config.greeting }]),
-      },
+      { text: 'Clear', style: 'destructive', onPress: () => persist([greeting()]) },
     ]);
   };
 
-  const tierLabel = tier === 'local'
-    ? `🖥️ ${localModelName ?? 'Local'}`
-    : p2pTarget === 'desktop' ? '💻 My Desktop' : '🌐 Network';
-  const tierSub = isMale
-    ? MEN_CONFIG.persona
-    : tier === 'local'
-      ? `${config.persona} · ${localModelName ?? 'no model downloaded'}`
-      : p2pTarget === 'desktop'
-        ? `${config.persona} · MedPsy-4B on your desktop (free)`
-        : `${config.persona} · MedPsy-4B public node (pay-per-token)`;
+  const toggleLanguage = async () => {
+    const next: CoachLanguage = language === 'en' ? 'sw' : 'en';
+    await updateUser({ language: next });
+    if (next === 'sw' && engineKind === 'qvac' && !hasTranslator) {
+      toast.show('Download the Kiswahili pack on AI Models to chat in Kiswahili', 'info');
+    }
+  };
 
-  const visibleMessages = messages.filter(m => m.role !== 'system');
-  const showSuggestions = visibleMessages.length <= 2 && !isTyping;
+  const onVoiceText = useCallback((text: string) => {
+    lastQuestionByVoice.current = true;
+    setInput(text);
+  }, []);
 
-  return (
-    <SafeAreaView style={[styles.container, { backgroundColor: themeColors.background }]}>
-      {/* Header */}
-      <View style={[styles.header, { backgroundColor: themeColors.card }]}>
-        <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }} onLongPress={clearChat}>
-          <View style={[styles.avatarSmall, { backgroundColor: themeColors.primary + '15' }]}>
-            <Text style={{ fontSize: 16 }}>{config.icon}</Text>
+  const subtitle = engineKind === 'demo'
+    ? 'Demo mode · template answers'
+    : activeModel ? `${activeModel.name} · on-device, offline` : 'No model downloaded';
+  const showSuggestions = messages.filter(m => m.role === 'user').length === 0 && !busy;
+  const urgent = flags.filter(f => f.severity === 'urgent');
+
+  const renderMessage = ({ item }: { item: ChatMessage }) => {
+    const mine = item.role === 'user';
+    const emergency = item.status === 'emergency';
+    const original = item.original && showOriginal[item.id ?? ''];
+    const text = original ? item.original! : item.content;
+    return (
+      <View style={[styles.bubble, mine ? [styles.mine, { backgroundColor: t.primaryStrong }] : [styles.theirs, { backgroundColor: emergency ? t.danger : t.card, borderColor: t.border }]]}>
+        {!mine && (
+          <View style={styles.bubbleHead}>
+            <Moon color={emergency ? '#FFFFFF' : t.primaryStrong} size={14} />
+            <Text style={[styles.bubbleLabel, { color: emergency ? '#FFFFFF' : t.textMuted }]}>
+              {emergency ? 'Safety' : `Luna · AI${item.engine === 'demo' ? ' (demo)' : ''}`}
+            </Text>
           </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.headerTitle}>Luna AI</Text>
-            <Text style={[styles.headerSub, { color: themeColors.primary }]} numberOfLines={1}>{tierSub}</Text>
-          </View>
-        </TouchableOpacity>
-        {!isMale && (
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            <TouchableOpacity
-              onPress={() => setShowTierSheet(s => !s)}
-              style={[styles.modeBtn, { backgroundColor: tier === 'local' ? themeColors.primary + '15' : '#dbeafe' }]}
-            >
-              <Text style={[styles.modeBtnText, { color: tier === 'local' ? themeColors.primary : '#3b82f6' }]}>
-                {tierLabel} ▾
-              </Text>
-            </TouchableOpacity>
-            {wdkBalance !== null && (
-              <TouchableOpacity style={styles.walletBtn} onPress={() => navigation.navigate('Wallet')}>
-                <Text style={styles.walletText}>💰 {wdkBalance}</Text>
-              </TouchableOpacity>
+        )}
+        <Text selectable style={[styles.bubbleText, { color: mine || emergency ? '#FFFFFF' : t.text }]}>{text}</Text>
+        {emergency && (
+          <Pressable onPress={() => Linking.openURL('tel:999')} accessibilityRole="button" accessibilityLabel="Call 999 now" style={styles.callBtn}>
+            <Phone color={t.danger} size={18} />
+            <Text style={{ color: t.danger, fontWeight: '800', fontSize: 16 }}>Call 999</Text>
+          </Pressable>
+        )}
+        {!mine && !emergency && item.id !== 'greeting' && (
+          <View style={styles.bubbleFoot}>
+            {item.status === 'stopped' && <Text style={[styles.meta, { color: t.subtext }]}>Stopped</Text>}
+            {item.status === 'cut_short' && <Text style={[styles.meta, { color: t.warning }]}>Cut short</Text>}
+            {item.original && (
+              <Pressable onPress={() => setShowOriginal(s => ({ ...s, [item.id!]: !s[item.id!] }))} accessibilityRole="button" hitSlop={8}>
+                <Text style={[styles.meta, { color: t.primaryStrong, fontWeight: '700' }]}>{original ? 'Show Kiswahili' : 'Machine-translated · Show English'}</Text>
+              </Pressable>
             )}
+            {item.status !== 'error' && item.content ? (
+              <IconButton
+                icon={Volume2}
+                size={18}
+                label={speakingId === item.id ? 'Stop reading' : 'Read aloud'}
+                color={speakingId === item.id ? t.primaryStrong : t.subtext}
+                onPress={() => {
+                  if (speakingId === item.id) { stopSpeaking(); setSpeakingId(null); return; }
+                  setSpeakingId(item.id ?? null);
+                  speak(text, original ? 'en' : item.language ?? 'en', () => setSpeakingId(null));
+                }}
+              />
+            ) : null}
+            {item.tokensPerSecond ? <Text style={[styles.meta, { color: t.subtext }]}>{item.tokensPerSecond.toFixed(1)} tok/s</Text> : null}
           </View>
         )}
       </View>
+    );
+  };
 
-      {/* Tier picker sheet */}
-      {showTierSheet && !isMale && (
-        <View style={[styles.tierSheet, { backgroundColor: themeColors.card }]}>
-          {[
-            {
-              key: 'local', title: '🖥️ On-device', active: tier === 'local',
-              desc: localModelName ? `${localModelName} · 100% private, offline` : 'Download a model first (Models page)',
-              onPress: () => { setTier('local'); setShowTierSheet(false); },
-            },
-            {
-              key: 'desktop', title: '💻 My desktop (Tier 2)', active: tier === 'p2p' && p2pTarget === 'desktop',
-              desc: 'MedPsy-4B on your paired computer · free, private',
-              onPress: () => { setTier('p2p'); setP2pTarget('desktop'); setShowTierSheet(false); },
-            },
-            {
-              key: 'network', title: '🌐 Public network (Tier 3)', active: tier === 'p2p' && p2pTarget === 'network',
-              desc: 'Anonymized prompt · 0.0001 USDt per token via WDK',
-              onPress: () => { setTier('p2p'); setP2pTarget('network'); setShowTierSheet(false); },
-            },
-          ].map(opt => (
-            <TouchableOpacity
-              key={opt.key}
-              onPress={opt.onPress}
-              style={[styles.tierOption, opt.active && { backgroundColor: themeColors.primary + '0C', borderColor: themeColors.primary }]}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.tierTitle, opt.active && { color: themeColors.primary }]}>{opt.title}</Text>
-                <Text style={styles.tierDesc}>{opt.desc}</Text>
-              </View>
-              {opt.active && <Text style={{ color: themeColors.primary, fontWeight: '800' }}>✓</Text>}
-            </TouchableOpacity>
-          ))}
+  const streamingBubble = busy ? (
+    <View style={[styles.bubble, styles.theirs, { backgroundColor: t.card, borderColor: t.border }]} accessibilityLiveRegion="polite">
+      <View style={styles.bubbleHead}>
+        <Moon color={t.primaryStrong} size={14} />
+        <Text style={[styles.bubbleLabel, { color: t.textMuted }]}>Luna · AI</Text>
+      </View>
+      {streamText ? (
+        <Text style={[styles.bubbleText, { color: t.text }]}>{streamText}</Text>
+      ) : (
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }} testID="coach-thinking">
+          <ActivityIndicator color={t.primaryStrong} size="small" />
+          <Text style={{ color: t.textMuted }}>
+            {stage === 'thinking' && thinkingSince ? `Thinking… ${Math.max(1, Math.round((now - thinkingSince) / 1000))} s` : stage ? STAGE_TEXT[stage] || 'Writing…' : 'Starting…'}
+          </Text>
         </View>
       )}
+      {stage === 'translating_out' && streamText ? <Text style={[styles.meta, { color: t.subtext, marginTop: 4 }]}>Translating…</Text> : null}
+    </View>
+  ) : null;
 
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={90}
-      >
-        <ScrollView
-          ref={scrollRef}
-          style={{ flex: 1 }}
-          contentContainerStyle={{ padding: 16, paddingBottom: 8 }}
-          onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
-          showsVerticalScrollIndicator={false}
-        >
-          {visibleMessages.map((msg, i) => (
-            <View
-              key={i}
-              style={[
-                styles.bubble,
-                msg.role === 'user'
-                  ? [styles.userBubble, { backgroundColor: themeColors.primary }]
-                  : [styles.aiBubble, { backgroundColor: themeColors.card }],
-              ]}
-            >
-              {msg.role === 'assistant' && (
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                  <View style={[styles.avatarTiny, { backgroundColor: themeColors.primary + '20' }]}>
-                    <Text style={{ fontSize: 10 }}>🌙</Text>
-                  </View>
-                  <Text style={{ fontSize: 11, color: '#94a3b8', fontWeight: '600' }}>
-                    Luna{msg.tier === 'p2p' ? ' · P2P' : ''}
-                  </Text>
-                </View>
-              )}
-              <Text style={[styles.bubbleText, msg.role === 'user' ? { color: '#fff' } : { color: '#334155' }]}>
-                {msg.content || '…'}
-              </Text>
-            </View>
-          ))}
-
-          {(isTyping || modelLoading) && (
-            <View style={[styles.aiBubble, styles.bubble, { backgroundColor: themeColors.card, flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
-              <ActivityIndicator color={themeColors.primary} size="small" />
-              {modelLoading && <Text style={{ fontSize: 12, color: '#94a3b8' }}>Loading {localModelName} into RAM…</Text>}
-            </View>
-          )}
-
-          {showSuggestions && (
-            <View style={styles.suggestRow}>
-              {config.prompts.map(p => (
-                <TouchableOpacity key={p} onPress={() => sendMessage(p)} style={[styles.suggestPill, { backgroundColor: themeColors.primary + '12' }]}>
-                  <Text style={[styles.suggestText, { color: themeColors.primary }]}>{p}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-        </ScrollView>
-
-        {/* Input */}
-        <View style={[styles.inputBar, { backgroundColor: themeColors.card }]}>
-          <TextInput
-            style={styles.input}
-            placeholder="Ask Luna anything…"
-            placeholderTextColor="#94a3b8"
-            value={input}
-            onChangeText={setInput}
-            onSubmitEditing={() => sendMessage()}
-            returnKeyType="send"
-          />
-          <TouchableOpacity
-            onPress={() => sendMessage()}
-            disabled={!input.trim() || isTyping}
-            style={[styles.sendBtn, { backgroundColor: input.trim() && !isTyping ? themeColors.primary : '#e2e8f0' }]}
-          >
-            <Text style={{ color: input.trim() && !isTyping ? '#fff' : '#94a3b8', fontSize: 18 }}>↑</Text>
-          </TouchableOpacity>
+  return (
+    <SafeAreaView edges={['top']} style={[styles.container, { backgroundColor: t.background }]}>
+      {/* Header */}
+      <View style={[styles.header, { backgroundColor: t.card, borderBottomColor: t.border }]}>
+        <View style={[styles.avatar, { backgroundColor: t.tint }]}><Moon color={t.primaryStrong} size={20} /></View>
+        <View style={{ flex: 1 }}>
+          <Text accessibilityRole="header" style={{ ...type.heading, color: t.text }}>Luna</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+            <Cpu color={engineKind === 'demo' ? t.warning : t.success} size={12} />
+            <Text style={{ fontSize: 12, color: engineKind === 'demo' ? t.warning : t.textMuted }} numberOfLines={1}>{subtitle}</Text>
+          </View>
         </View>
+        <Pressable
+          testID="coach-language"
+          onPress={toggleLanguage}
+          accessibilityRole="button"
+          accessibilityLabel={`Reply language: ${language === 'en' ? 'English' : 'Kiswahili'}. Tap to switch`}
+          style={[styles.langBtn, { backgroundColor: t.tint }]}
+        >
+          <Languages color={t.primaryStrong} size={16} />
+          <Text style={{ ...type.label, color: t.primaryStrong }}>{language === 'en' ? 'EN' : 'SW'}</Text>
+        </Pressable>
+        <IconButton icon={Trash2} label="Clear conversation" onPress={clearChat} color={t.textMuted} size={20} />
+      </View>
+
+      {engineKind === 'demo' && (
+        <View style={{ paddingHorizontal: space.lg, paddingTop: space.md }}>
+          <Banner severity="warn" title="Demo mode" body="You're in Expo Go, so answers come from templates. Install the LunaPredict build to run QVAC MedPsy on this phone." />
+        </View>
+      )}
+      {language === 'sw' && engineKind === 'qvac' && !hasTranslator && (
+        <View style={{ paddingHorizontal: space.lg, paddingTop: space.md }}>
+          <Banner severity="info" title="Kiswahili pack needed" body="Download it once (641 MB) to chat in Kiswahili offline."
+            actions={[{ label: 'Open AI Models', onPress: () => navigation.navigate('Models') }]} />
+        </View>
+      )}
+      {urgent.length > 0 && (
+        <View style={{ paddingHorizontal: space.lg, paddingTop: space.md }}>{urgent.map(f => <FlagBanner key={f.id} flag={f} />)}</View>
+      )}
+
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
+        {needsModel ? (
+          <View style={{ flex: 1, justifyContent: 'center' }}>
+            <EmptyState
+              icon={Download}
+              title="Download Luna's brain once"
+              body="MedPsy 1.7B (1.3 GB) runs entirely on this phone — your questions never leave it, and it works offline. Wi-Fi recommended."
+              action={{ label: 'Open AI Models', onPress: () => navigation.navigate('Models'), testID: 'coach-open-models' }}
+            />
+          </View>
+        ) : (
+          <FlatList
+            ref={listRef}
+            data={messages}
+            keyExtractor={m => m.id ?? m.timestamp ?? m.content.slice(0, 20)}
+            renderItem={renderMessage}
+            contentContainerStyle={{ padding: space.lg, paddingBottom: space.sm }}
+            onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+            keyboardShouldPersistTaps="handled"
+            ListFooterComponent={
+              <>
+                {streamingBubble}
+                {showSuggestions && (
+                  <View style={styles.suggestions}>
+                    {PROMPTS[persona][language].map(p => (
+                      <Pressable key={p} onPress={() => send(p)} accessibilityRole="button" style={[styles.suggestion, { backgroundColor: t.tint }]}>
+                        <Text style={{ ...type.label, color: t.primaryStrong }}>{p}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                )}
+              </>
+            }
+          />
+        )}
+
+        {/* Composer */}
+        <View style={[styles.composer, { backgroundColor: t.card, borderTopColor: t.border }]}>
+          <MicButton testID="coach-mic" language={language} onText={onVoiceText} onError={m => toast.show(m, 'error')} disabled={busy || needsModel} />
+          <TextInput
+            testID="coach-input"
+            style={[styles.input, { backgroundColor: t.surface, color: t.text, borderColor: t.border }]}
+            placeholder={language === 'sw' ? 'Muulize Luna chochote…' : 'Ask Luna anything…'}
+            placeholderTextColor={t.subtext}
+            value={input}
+            onChangeText={v => { setInput(v); if (!v) lastQuestionByVoice.current = false; }}
+            multiline
+            maxLength={800}
+            editable={!needsModel}
+            accessibilityLabel="Message to Luna"
+          />
+          {busy ? (
+            <Pressable testID="coach-stop" onPress={stop} accessibilityRole="button" accessibilityLabel="Stop generating" style={[styles.sendBtn, { backgroundColor: t.text }]}>
+              <Square color="#FFFFFF" size={16} fill="#FFFFFF" />
+            </Pressable>
+          ) : (
+            <Pressable
+              testID="coach-send"
+              onPress={() => send()}
+              disabled={!input.trim() || needsModel}
+              accessibilityRole="button"
+              accessibilityLabel="Send"
+              accessibilityState={{ disabled: !input.trim() || needsModel }}
+              style={[styles.sendBtn, { backgroundColor: input.trim() && !needsModel ? t.primaryStrong : t.border }]}
+            >
+              <ArrowUp color={input.trim() && !needsModel ? '#FFFFFF' : t.subtext} size={22} />
+            </Pressable>
+          )}
+        </View>
+        <Text style={[styles.disclaimer, { color: t.subtext, backgroundColor: t.card }]}>AI guidance, not medical advice. In an emergency call 999 or 112.</Text>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -387,46 +401,22 @@ export default function AICoachScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  header: {
-    paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.05)',
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-  },
-  avatarSmall: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  headerTitle: { fontSize: 16, fontWeight: '700', color: '#1e293b' },
-  headerSub: { fontSize: 10, fontWeight: '600' },
-  modeBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
-  modeBtnText: { fontSize: 11, fontWeight: '700' },
-  walletBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12, backgroundColor: '#ecfdf5', alignItems: 'center', justifyContent: 'center' },
-  walletText: { fontSize: 11, fontWeight: '700', color: '#059669' },
-  tierSheet: {
-    paddingHorizontal: 12, paddingVertical: 10, gap: 8,
-    borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.06)',
-  },
-  tierOption: {
-    flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 14,
-    borderWidth: 1.5, borderColor: '#e2e8f0',
-  },
-  tierTitle: { fontSize: 13.5, fontWeight: '800', color: '#334155' },
-  tierDesc: { fontSize: 11.5, color: '#94a3b8', marginTop: 2 },
-  bubble: { maxWidth: '85%', borderRadius: 20, padding: 14, marginBottom: 12 },
-  userBubble: { alignSelf: 'flex-end', borderBottomRightRadius: 4 },
-  aiBubble: {
-    alignSelf: 'flex-start', borderBottomLeftRadius: 4,
-    borderWidth: 1, borderColor: 'rgba(0,0,0,0.05)',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.04, shadowRadius: 8,
-  },
-  avatarTiny: { width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  bubbleText: { fontSize: 15, lineHeight: 22 },
-  suggestRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
-  suggestPill: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 100 },
-  suggestText: { fontSize: 13, fontWeight: '600' },
-  inputBar: {
-    flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8,
-    borderTopWidth: 1, borderTopColor: 'rgba(0,0,0,0.05)',
-  },
-  input: {
-    flex: 1, backgroundColor: '#f8fafc', borderRadius: 100, paddingHorizontal: 16, paddingVertical: 12,
-    fontSize: 15, color: '#334155', marginRight: 8, borderWidth: 1, borderColor: '#e2e8f0',
-  },
-  sendBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  header: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingHorizontal: space.lg, paddingVertical: space.sm, borderBottomWidth: StyleSheet.hairlineWidth, minHeight: 64 },
+  avatar: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  langBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: space.md, minHeight: 40, borderRadius: radius.pill },
+  bubble: { maxWidth: '88%', borderRadius: 20, padding: space.md + 2, marginBottom: space.md },
+  mine: { alignSelf: 'flex-end', borderBottomRightRadius: 6 },
+  theirs: { alignSelf: 'flex-start', borderBottomLeftRadius: 6, borderWidth: StyleSheet.hairlineWidth },
+  bubbleHead: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  bubbleLabel: { fontSize: 12, fontWeight: '700' },
+  bubbleText: { fontSize: 16, lineHeight: 23 },
+  bubbleFoot: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm, marginTop: 4, marginBottom: -8 },
+  meta: { fontSize: 12 },
+  callBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.sm, backgroundColor: '#FFFFFF', borderRadius: radius.pill, minHeight: 48, marginTop: space.md },
+  suggestions: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm },
+  suggestion: { paddingHorizontal: space.lg, minHeight: 40, justifyContent: 'center', borderRadius: radius.pill },
+  composer: { flexDirection: 'row', alignItems: 'flex-end', gap: space.sm, paddingHorizontal: space.md, paddingTop: space.sm, paddingBottom: space.xs, borderTopWidth: StyleSheet.hairlineWidth },
+  input: { flex: 1, borderRadius: 22, borderWidth: 1, paddingHorizontal: space.lg, paddingTop: 12, paddingBottom: 12, fontSize: 16, maxHeight: 120, minHeight: 44 },
+  sendBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  disclaimer: { fontSize: 12, textAlign: 'center', paddingBottom: space.sm, paddingTop: 2 },
 });

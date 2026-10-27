@@ -1,18 +1,20 @@
 {
   "expo": {
-    "name": "lunapredict-mobile",
+    "name": "LunaPredict",
     "slug": "lunapredict-mobile",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.lunapredict.mobile"
     },
     "android": {
       "package": "com.lunapredict.mobile",
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#FFF1F3",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -23,7 +25,35 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-status-bar"
-    ]
+      "expo-status-bar",
+      [
+        "@qvac/sdk/expo-plugin",
+        {
+          "installMissingPrebuilds": true
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "LunaPredict uses the microphone for voice questions and voice logging. Audio stays on your phone.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#BE123C"
+        }
+      ],
+      "expo-sharing",
+      "expo-localization",
+      "expo-asset"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "77179a2b-bba0-47ae-a2ed-44a91152cfe3"
+      }
+    }
   }
 }
