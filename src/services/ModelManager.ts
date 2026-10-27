@@ -53,8 +53,14 @@ class ModelManagerImpl {
       if (e.state.status === 'downloading') e.state = { status: 'paused', progress: e.state.progress };
     }
     this.loaded = true;
-    await this.reconcileWithCache();
     await this.persist();
+    // Checking the SDK cache boots the QVAC worker; never make app launch wait for it
+    setTimeout(() => {
+      this.reconcileWithCache()
+        .then(() => this.persist())
+        .then(() => this.registry.forEach(e => this.emit(e.modelId, e.state, true)))
+        .catch(() => {});
+    }, 2500);
     return this.registry;
   }
 
