@@ -173,21 +173,21 @@ export function computeCycleStatus(user: UserProfile, allLogs: SymptomLog[], now
     phaseLabel = 'Period late';
   }
 
-  // Predicted period and fertile days: current cycle (if not observed) + next 2 cycles
+  // Predicted period and fertile days: current cycle (if not observed) + next 5 cycles (up to ~6 months ahead)
   const periodDates: LogDay[] = [];
   const fertileDates: LogDay[] = [];
+  const allPeakDays: LogDay[] = [...peakDays];
   if (!anchorEpisode && !isLate) periodDates.push(...range(anchor, P));
-  for (let c = 0; c < 3; c++) {
+  for (let c = 0; c < 6; c++) {
     const start = addDays(nextPeriod, c * L);
     if (c === 0 && isLate) {
       // overdue: no future prediction for this cycle until the period starts
     } else {
       periodDates.push(...range(start, P));
     }
-    if (c < 2) {
-      const ovDay = addDays(start, L - luteal);
-      fertileDates.push(...range(addDays(ovDay, -5), 6));
-    }
+    const ovDay = addDays(start, L - luteal);
+    fertileDates.push(...range(addDays(ovDay, -5), 6));
+    allPeakDays.push(...range(addDays(ovDay, -2), 3));
   }
   if (!isLate) fertileDates.unshift(...range(fertileStart, 6));
 
@@ -209,7 +209,7 @@ export function computeCycleStatus(user: UserProfile, allLogs: SymptomLog[], now
     daysUntilOvulation: Math.max(0, daysBetween(today, ov.day)),
     fertileWindowStart: fertileStart,
     fertileWindowEnd: fertileEnd,
-    peakDays,
+    peakDays: [...new Set(allPeakDays)],
     inFertileWindow,
     periodDates: [...new Set(periodDates)],
     fertileDates: [...new Set(fertileDates)],
@@ -221,11 +221,64 @@ export function computeCycleStatus(user: UserProfile, allLogs: SymptomLog[], now
   };
 }
 
-/** Today's fertility level for conceive mode. */
-export function fertilityLevel(cycle: CycleStatus, today: LogDay): 'low' | 'high' | 'peak' {
-  if (cycle.peakDays.includes(today)) return 'peak';
-  if (cycle.inFertileWindow) return 'high';
+/** Fertility level for a given day in conceive mode. */
+export function fertilityLevel(cycle: CycleStatus, day: LogDay): 'low' | 'high' | 'peak' {
+  if (cycle.peakDays.includes(day)) return 'peak';
+  if (cycle.fertileDates.includes(day)) return 'high';
   return 'low';
+}
+
+export interface ConceptionInfo {
+  level: 'low' | 'high' | 'peak';
+  chanceLabel: string;
+  percentage: string;
+  detail: string;
+}
+
+/** Detailed conception probability and clinical insight for conceive mode (Wilcox et al. 1995). */
+export function getConceptionInfo(cycle: CycleStatus | null, day: LogDay): ConceptionInfo {
+  if (!cycle) {
+    return {
+      level: 'low',
+      chanceLabel: 'Low chance',
+      percentage: '<3%',
+      detail: 'Low probability of conception outside the fertile window.',
+    };
+  }
+  const isOvulation = day === cycle.ovulationDate;
+  const isPeak = cycle.peakDays.includes(day);
+  const isFertile = cycle.fertileDates.includes(day);
+
+  if (isOvulation) {
+    return {
+      level: 'peak',
+      chanceLabel: 'Peak chance · Ovulation day',
+      percentage: '~33%',
+      detail: 'Highest conception chance. An egg is released and viable for 12–24 hours.',
+    };
+  }
+  if (isPeak) {
+    return {
+      level: 'peak',
+      chanceLabel: 'Peak chance',
+      percentage: '~27–31%',
+      detail: 'Optimal timing. Intercourse on peak days maximizes the chance of fertilization.',
+    };
+  }
+  if (isFertile) {
+    return {
+      level: 'high',
+      chanceLabel: 'High chance',
+      percentage: '~11–15%',
+      detail: 'Fertile window. Sperm can survive up to 5 days in fertile cervical mucus awaiting ovulation.',
+    };
+  }
+  return {
+    level: 'low',
+    chanceLabel: 'Low chance',
+    percentage: '<3%',
+    detail: 'Outside fertile window. Low probability of conception.',
+  };
 }
 
 export { PHASE_LABELS };
