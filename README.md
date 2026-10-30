@@ -8,7 +8,9 @@
 
 > **Repository**: [https://github.com/luna-predict/luna-mobile](https://github.com/luna-predict/luna-mobile)  
 > **Landing Page & Web App**: [https://lunapredict.vercel.app](https://lunapredict.vercel.app) · [Frontend Repository](https://github.com/luna-predict/luna-frontend)  
-> **Direct Android APK Download**: [Download Latest APK](https://lunapredict.vercel.app/download)
+> **Direct Android APK Download**: [Download .apk (EAS Build Artifact)](https://expo.dev/artifacts/eas/meXHMV7QVRx8dwxa-R1e1JmdGk9iQFJe9oY4rJB2PMs.apk)  
+> **EAS Production Build Dashboard**: [Expo EAS Build #78506a43](https://expo.dev/accounts/degen90/projects/lunapredict-mobile/builds/78506a43-556d-4b38-9eb9-8303f648855e)  
+> **Official Demo Walkthrough**: [Watch on YouTube](https://www.youtube.com/watch?v=NQ4eVRe_TWQ)
 
 ---
 
@@ -89,6 +91,12 @@ npx eas-cli login
 # Build standalone Android preview APK
 npx eas-cli build -p android --profile preview
 ```
+
+#### 📦 Download Verified Standalone APK
+Rather than building locally from source, you can directly download and install the pre-compiled Android release build:
+- **Direct APK Download**: [Download .apk (EAS Build #78506a43)](https://expo.dev/artifacts/eas/meXHMV7QVRx8dwxa-R1e1JmdGk9iQFJe9oY4rJB2PMs.apk)
+- **EAS Build Console**: [Expo EAS Build #78506a43-556d-4b38-9eb9-8303f648855e](https://expo.dev/accounts/degen90/projects/lunapredict-mobile/builds/78506a43-556d-4b38-9eb9-8303f648855e)
+- **Interactive Web App & Details**: [lunapredict.vercel.app](https://lunapredict.vercel.app)
 
 The resulting standalone signed APK can be sideloaded directly onto any Android phone.
 
@@ -178,3 +186,4 @@ lunapredict-mobile/
 
 - **License**: MIT License — see [LICENSE](./LICENSE).
 - **Attribution**: Built with Tether QVAC, Holepunch Pears, and Tether WDK for the Tether Developers Cup · AI Yako.
+
