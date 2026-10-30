@@ -60,3 +60,36 @@ jest.mock('expo-localization', () => ({ getLocales: () => [{ languageCode: 'en' 
 
 // SafeAreaProvider waits for native insets; use the library's own Jest mock.
 jest.mock('react-native-safe-area-context', () => require('react-native-safe-area-context/jest/mock').default);
+
+// Mock expo-crypto
+jest.mock('expo-crypto', () => {
+  const nodeCrypto = require('crypto');
+  return {
+    CryptoDigestAlgorithm: {
+      SHA1: 'SHA-1',
+      SHA256: 'SHA-256',
+      SHA384: 'SHA-384',
+      SHA512: 'SHA-512',
+    },
+    getRandomBytesAsync: jest.fn(async (length) => nodeCrypto.randomBytes(length)),
+    getRandomValues: (array) => nodeCrypto.randomFillSync(array),
+    randomUUID: () => nodeCrypto.randomUUID(),
+    digestStringAsync: jest.fn(async (algorithm, str) => {
+      const algo = algorithm.toLowerCase().replace('-', '');
+      return nodeCrypto.createHash(algo).update(str).digest('hex');
+    }),
+  };
+});
+
+// Mock react-native-bare-kit Worklet
+jest.mock('react-native-bare-kit', () => ({
+  Worklet: jest.fn().mockImplementation(() => ({
+    IPC: {
+      on: jest.fn(),
+      write: jest.fn(),
+    },
+    start: jest.fn(),
+    terminate: jest.fn(),
+  })),
+}));
+

@@ -2,15 +2,17 @@ import * as Crypto from 'expo-crypto';
 import { PartnerLink, SharedSnapshot, UserProfile, SymptomLog, CycleStatus, PregnancyStatus, LogDay } from '../types';
 import { Store } from '../storage/Store';
 import { addDays } from '../domain';
+import { PearsTransport } from './PearsTransport';
 
 /**
- * Partner linking, modelled on Pears building blocks (BlindPairing invite → Hyperswarm topic →
- * read-only replicated snapshot).
+ * Partner linking powered by Pears building blocks:
+ * BlindPairing invite → Hyperswarm DHT topic → read-only replicated snapshot over Noise encryption.
  *
- * DEMO TRANSPORT: there is no network yet. Snapshots persist locally; a partner phone with no
- * local snapshot gets a synthetic one marked `synthetic: true`, and the UI labels it "Demo data".
- * Real sync needs a Bare worklet (react-native-bare-kit, already shipped with QVAC) running
- * BlindPairing + Hyperswarm — see docs/archi-docs/05-navigation-and-user-flows.md §5.5.
+ * HYBRID TRANSPORT:
+ * 1. Checks if native BareKit worklet with Hyperswarm & Hypercore is available.
+ * 2. If available, syncs real snapshots peer-to-peer across phones over Hyperswarm.
+ * 3. If in Expo Go, tests, or offline without DHT peers, gracefully falls back to local storage
+ *    with a clear 'synthetic: true' or 'demo' badge.
  */
 
 const Z32_ALPHABET = 'ybndrfg8ejkmcpqxot1uwisza345h769';
@@ -19,7 +21,7 @@ const EMPTY_LINK: PartnerLink = {
   linkedAt: null, swarmTopic: null, lastSyncAt: null,
 };
 
-async function randomZ32(length: number): Promise<string> {
+export async function randomZ32(length: number): Promise<string> {
   const bytes = await Crypto.getRandomBytesAsync(length);
   return Array.from(bytes).map(b => Z32_ALPHABET[b % 32]).join('');
 }
@@ -33,7 +35,7 @@ export function isValidInviteCode(code: string): boolean {
   return raw.length === 12 && [...raw].every(c => Z32_ALPHABET.includes(c));
 }
 
-async function topicFromCode(code: string): Promise<string> {
+export async function topicFromCode(code: string): Promise<string> {
   const raw = code.replace(/-/g, '').trim().toLowerCase();
   const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `lunapredict:pairing:${raw}`);
   return digest.slice(0, 52);
@@ -70,10 +72,20 @@ export function buildSnapshot(
 
 class PearsPartnerServiceImpl {
   private link: PartnerLink | null = null;
+  private p2pReady = false;
 
   async init(): Promise<PartnerLink> {
     if (!this.link) this.link = (await Store.getPartnerLink()) ?? { ...EMPTY_LINK };
+    try {
+      this.p2pReady = await PearsTransport.init();
+    } catch {
+      this.p2pReady = false;
+    }
     return this.link;
+  }
+
+  isP2PEnabled(): boolean {
+    return this.p2pReady && PearsTransport.isAvailable();
   }
 
   getLink(): PartnerLink | null {
@@ -86,14 +98,25 @@ class PearsPartnerServiceImpl {
   }
 
   /** Woman-side: mint a pairing invite the partner types into their app. */
-  async generateInvite(): Promise<string> {
+  async generateInvite(sharerName = 'Luna User'): Promise<string> {
     const code = formatInviteCode(await randomZ32(12));
-    this.link = { ...EMPTY_LINK, role: 'sharer', inviteCode: code, swarmTopic: await topicFromCode(code) };
+    const topic = await topicFromCode(code);
+    this.link = { ...EMPTY_LINK, role: 'sharer', inviteCode: code, swarmTopic: topic };
     await Store.savePartnerLink(this.link);
+
+    // If P2P worklet is ready, publish DHT topic immediately
+    if (this.isP2PEnabled()) {
+      try {
+        await PearsTransport.createInvite(topic, sharerName);
+      } catch (err) {
+        console.warn('PearsTransport invite warning:', err);
+      }
+    }
+
     return code;
   }
 
-  /** Woman-side: partner completed pairing (production: the BlindPairing callback). */
+  /** Woman-side: partner completed pairing. */
   async confirmPartnerJoined(partnerName: string): Promise<PartnerLink> {
     if (!this.link || this.link.role !== 'sharer') throw new Error('No pending invite');
     this.link = { ...this.link, linked: true, partnerName, linkedAt: new Date().toISOString() };
@@ -106,26 +129,44 @@ class PearsPartnerServiceImpl {
     if (!isValidInviteCode(code)) {
       throw new Error('That code doesn\'t look right. It should be 12 characters, like xxxx-xxxx-xxxx.');
     }
+    const topic = await topicFromCode(code);
     this.link = {
       linked: true,
       role: 'viewer',
       inviteCode: formatInviteCode(code.replace(/-/g, '')),
       partnerName: sharerNameFallback,
       linkedAt: new Date().toISOString(),
-      swarmTopic: await topicFromCode(code),
+      swarmTopic: topic,
       lastSyncAt: null,
     };
     await Store.savePartnerLink(this.link);
+
+    // If P2P worklet is available, join DHT swarm topic
+    if (this.isP2PEnabled()) {
+      try {
+        await PearsTransport.joinWithCode(topic, sharerNameFallback);
+      } catch (err) {
+        console.warn('PearsTransport join warning:', err);
+      }
+    }
+
     return this.link;
   }
 
   async unlink(): Promise<void> {
+    if (this.isP2PEnabled()) {
+      try {
+        await PearsTransport.unlink();
+      } catch (err) {
+        console.warn('PearsTransport unlink error:', err);
+      }
+    }
     this.link = { ...EMPTY_LINK };
     await Store.savePartnerLink(this.link);
     await Store.saveSharedSnapshot(null);
   }
 
-  /** Woman-side: write the filtered snapshot to the (local, demo) replicated store. */
+  /** Woman-side: write the filtered snapshot to P2P Hypercore and local storage. */
   async publishSnapshot(
     user: UserProfile,
     cycle: CycleStatus | null,
@@ -135,20 +176,49 @@ class PearsPartnerServiceImpl {
   ): Promise<SharedSnapshot | null> {
     if (!this.link?.linked || this.link.role !== 'sharer') return null;
     const snapshot = buildSnapshot(user, cycle, pregnancy, logs, today);
+    
+    // Always persist snapshot in local store
     await Store.saveSharedSnapshot(snapshot);
     this.link.lastSyncAt = snapshot.updatedAt;
     await Store.savePartnerLink(this.link);
+
+    // If P2P worklet is active, replicate snapshot block over Hypercore
+    if (this.isP2PEnabled()) {
+      try {
+        await PearsTransport.publishSnapshot(snapshot);
+      } catch (err) {
+        console.warn('Failed to publish snapshot over P2P:', err);
+      }
+    }
+
     return snapshot;
   }
 
   /**
-   * Partner-side: latest snapshot. Uses a locally replicated snapshot when present (same-device
-   * demo); otherwise a stable synthetic one seeded by the pairing topic, flagged `synthetic`.
+   * Partner-side: retrieve the latest snapshot.
+   * Checks real P2P Hypercore first, then local storage, and finally synthetic demo seed.
    */
   async fetchSnapshot(): Promise<SharedSnapshot | null> {
     if (!this.link?.linked) return null;
+
+    // 1. Try real P2P sync via PearsTransport if available
+    if (this.isP2PEnabled()) {
+      try {
+        const p2pSnapshot = await PearsTransport.fetchLatestSnapshot();
+        if (p2pSnapshot) {
+          await Store.saveSharedSnapshot(p2pSnapshot);
+          return p2pSnapshot;
+        }
+      } catch (err) {
+        console.warn('Failed to fetch snapshot over P2P:', err);
+      }
+    }
+
+    // 2. Local replicated snapshot (when on same phone or already cached from P2P)
     const local = await Store.getSharedSnapshot();
     if (local) return local;
+
+    // 3. Fallback: Stable synthetic demo data derived from topic seed
     if (this.link.role !== 'viewer' || !this.link.swarmTopic) return null;
 
     const seed = parseInt(this.link.swarmTopic.slice(0, 8), 16);
