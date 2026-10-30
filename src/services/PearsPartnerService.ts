@@ -76,16 +76,22 @@ class PearsPartnerServiceImpl {
 
   async init(): Promise<PartnerLink> {
     if (!this.link) this.link = (await Store.getPartnerLink()) ?? { ...EMPTY_LINK };
-    try {
-      this.p2pReady = await PearsTransport.init();
-    } catch {
-      this.p2pReady = false;
+    // Non-blocking initialization so partner transport never blocks or delays app launch
+    if (this.link.linked) {
+      PearsTransport.init().then(ready => { this.p2pReady = ready; }).catch(() => { this.p2pReady = false; });
     }
     return this.link;
   }
 
   isP2PEnabled(): boolean {
     return this.p2pReady && PearsTransport.isAvailable();
+  }
+
+  async ensureP2P(): Promise<boolean> {
+    if (!this.p2pReady) {
+      this.p2pReady = await PearsTransport.init().catch(() => false);
+    }
+    return this.isP2PEnabled();
   }
 
   getLink(): PartnerLink | null {
@@ -105,7 +111,7 @@ class PearsPartnerServiceImpl {
     await Store.savePartnerLink(this.link);
 
     // If P2P worklet is ready, publish DHT topic immediately
-    if (this.isP2PEnabled()) {
+    if (await this.ensureP2P()) {
       try {
         await PearsTransport.createInvite(topic, sharerName);
       } catch (err) {
@@ -142,7 +148,7 @@ class PearsPartnerServiceImpl {
     await Store.savePartnerLink(this.link);
 
     // If P2P worklet is available, join DHT swarm topic
-    if (this.isP2PEnabled()) {
+    if (await this.ensureP2P()) {
       try {
         await PearsTransport.joinWithCode(topic, sharerNameFallback);
       } catch (err) {
@@ -176,7 +182,7 @@ class PearsPartnerServiceImpl {
   ): Promise<SharedSnapshot | null> {
     if (!this.link?.linked || this.link.role !== 'sharer') return null;
     const snapshot = buildSnapshot(user, cycle, pregnancy, logs, today);
-    
+
     // Always persist snapshot in local store
     await Store.saveSharedSnapshot(snapshot);
     this.link.lastSyncAt = snapshot.updatedAt;

@@ -1,4 +1,4 @@
-import { Worklet } from 'react-native-bare-kit';
+import type { Worklet } from 'react-native-bare-kit';
 import { PEARS_WORKLET_SOURCE } from './pears-worklet.bundle';
 import { SharedSnapshot } from '../types';
 
@@ -13,12 +13,38 @@ export interface PearsWorkletResponse {
   error?: string;
 }
 
+function stringToBytes(str: string): Uint8Array {
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(str);
+  }
+  const bytes = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) {
+    bytes[i] = str.charCodeAt(i) & 0xff;
+  }
+  return bytes;
+}
+
+function bytesToString(chunk: any): string {
+  if (typeof chunk === 'string') return chunk;
+  if (chunk instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk))) {
+    if (typeof TextDecoder !== 'undefined') {
+      return new TextDecoder().decode(chunk);
+    }
+    let res = '';
+    for (let i = 0; i < chunk.length; i++) {
+      res += String.fromCharCode(chunk[i]);
+    }
+    return res;
+  }
+  return String(chunk ?? '');
+}
+
 /**
  * PearsTransport provides communication between React Native and the BareKit Worklet
  * that runs the real Holepunch/Pears peer-to-peer stack (Hyperswarm & Hypercore).
  */
 class PearsTransportService {
-  private worklet: Worklet | null = null;
+  private worklet: any = null;
   private requestId = 0;
   private pendingRequests = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void }>();
   private eventListeners = new Set<(event: PearsWorkletEvent) => void>();
@@ -41,11 +67,30 @@ class PearsTransportService {
     }
 
     try {
-      this.worklet = new Worklet();
+      // Dynamic require so if BareKit TurboModule is absent or fails to load,
+      // it won't crash the JS bundle at app startup.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const bareKitModule = require('react-native-bare-kit');
+      const WorkletClass = bareKitModule?.Worklet;
+      if (!WorkletClass) {
+        this.available = false;
+        return false;
+      }
+
+      this.worklet = new WorkletClass();
       const { IPC } = this.worklet;
+      if (!IPC) {
+        this.available = false;
+        return false;
+      }
+
+      // Attach error listener so stream errors do not turn into uncaught fatal crashes
+      IPC.on('error', (err: any) => {
+        console.warn('[PearsTransport] IPC stream warning:', err);
+      });
 
       IPC.on('data', (chunk: any) => {
-        const text = chunk.toString();
+        const text = bytesToString(chunk);
         this.buffer += text;
         let boundary = this.buffer.indexOf('\n');
 
@@ -58,7 +103,7 @@ class PearsTransportService {
           try {
             const parsed = JSON.parse(line);
             if (parsed.type === 'response') {
-              const pending = this.pendingRequests.get(parsed.payload.id);
+              const pending = this.pendingRequests.get(parsed.payload?.id);
               if (pending) {
                 this.pendingRequests.delete(parsed.payload.id);
                 if (parsed.payload.error) {
@@ -70,7 +115,7 @@ class PearsTransportService {
             } else if (parsed.type === 'event') {
               this.eventListeners.forEach(listener => listener(parsed.payload));
             } else if (parsed.type === 'status') {
-              this.available = !!parsed.payload.ready;
+              this.available = !!parsed.payload?.ready;
             }
           } catch {
             // malformed json frame; drop
@@ -83,7 +128,8 @@ class PearsTransportService {
       // Ping worklet to ensure channel is up
       const pingRes = await this.request('ping', {}, 2000).catch(() => null);
       this.available = pingRes?.ok === true;
-    } catch {
+    } catch (err) {
+      console.warn('[PearsTransport] Failed to initialize worklet:', err);
       this.available = false;
     }
 
@@ -127,7 +173,9 @@ class PearsTransportService {
       });
 
       try {
-        this.worklet!.IPC.write(payload);
+        // NativeBareKit.write requires a TypedArray (ArrayBufferView), never a string!
+        const bytes = stringToBytes(payload);
+        this.worklet!.IPC.write(bytes);
       } catch (err) {
         clearTimeout(timer);
         this.pendingRequests.delete(id);
@@ -155,7 +203,7 @@ class PearsTransportService {
 
   async unlink(): Promise<void> {
     if (!this.worklet) return;
-    await this.request('unlink', {}, 3000).catch(() => {});
+    await this.request('unlink', {}, 3000).catch(() => { });
   }
 }
 

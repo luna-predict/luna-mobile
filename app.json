@@ -19,7 +19,13 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -52,8 +58,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "77179a2b-bba0-47ae-a2ed-44a91152cfe3"
+        "projectId": "387ac557-8e38-4cae-8325-56ed8b634514"
       }
-    }
+    },
+    "owner": "degen90"
   }
 }

@@ -55,21 +55,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     (async () => {
-      await Store.migrate();
-      const [storedUser, storedLogs, link, , , dismissedFlags] = await Promise.all([
-        Store.getUser(),
-        Store.getLogs(),
-        PearsPartnerService.init(),
-        WdkService.init(),
-        ModelManager.init(),
-        Store.getDismissedFlags(),
-      ]);
-      userRef.current = storedUser;
-      setUser(storedUser);
-      setLogs(storedLogs);
-      setPartnerLink(link);
-      setDismissed(dismissedFlags);
-      setReady(true);
+      try {
+        await Store.migrate().catch(e => console.warn('[Store.migrate] failed:', e));
+        const [storedUser, storedLogs, link, , , dismissedFlags] = await Promise.all([
+          Store.getUser().catch(() => null),
+          Store.getLogs().catch(() => []),
+          PearsPartnerService.init().catch(e => { console.warn('[PearsPartnerService.init] failed:', e); return null; }),
+          WdkService.init().catch(e => { console.warn('[WdkService.init] failed:', e); return null; }),
+          ModelManager.init().catch(e => { console.warn('[ModelManager.init] failed:', e); return []; }),
+          Store.getDismissedFlags().catch(() => ({})),
+        ]);
+        userRef.current = storedUser;
+        setUser(storedUser);
+        setLogs(storedLogs ?? []);
+        setPartnerLink(link);
+        setDismissed(dismissedFlags ?? {});
+      } catch (err) {
+        console.error('[AppContext] Failed to initialize state:', err);
+      } finally {
+        setReady(true);
+      }
     })();
   }, []);
 
