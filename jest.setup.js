@@ -18,7 +18,13 @@ jest.mock('expo-audio', () => ({
   setAudioModeAsync: jest.fn(async () => {}),
 }));
 
-jest.mock('expo-speech', () => ({ speak: jest.fn(), stop: jest.fn() }));
+jest.mock('expo-speech', () => ({
+  speak: jest.fn(),
+  stop: jest.fn(),
+  pause: jest.fn(async () => {}),
+  resume: jest.fn(async () => {}),
+  isSpeakingAsync: jest.fn(async () => false),
+}));
 
 jest.mock('expo-notifications', () => ({
   setNotificationHandler: jest.fn(),

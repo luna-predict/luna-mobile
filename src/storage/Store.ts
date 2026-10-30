@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   UserProfile, SymptomLog, MenCheckIn, WalletState, PartnerLink,
-  ModelRegistryEntry, SharedSnapshot, ChatMessage, LogDay, AppMode,
+  ModelRegistryEntry, SharedSnapshot, ChatMessage, ChatSession, LogDay, AppMode,
 } from '../types';
 import { migrateCheckInsToV2, migrateLogsToV2 } from './migrations';
 
@@ -19,6 +19,7 @@ const KEYS = {
   sharedSnapshot: 'luna:sharedSnapshot',
   models: 'luna:models',
   chatHistory: 'luna:chatHistory',
+  chatSessions: 'luna:chatSessions',
   flagsDismissed: 'luna:flagsDismissed',
 } as const;
 
@@ -116,9 +117,52 @@ export const Store = {
   getModelRegistry: async (): Promise<ModelRegistryEntry[]> => (await getJSON<ModelRegistryEntry[]>(KEYS.models)) ?? [],
   saveModelRegistry: (entries: ModelRegistryEntry[]) => setJSON(KEYS.models, entries),
 
-  // ── Chat ──
+  // ── Chat & Multiple Sessions ──
   getChatHistory: async (): Promise<ChatMessage[]> => (await getJSON<ChatMessage[]>(KEYS.chatHistory)) ?? [],
   saveChatHistory: (msgs: ChatMessage[]) => setJSON(KEYS.chatHistory, msgs.slice(-100)),
+
+  getChatSessions: async (): Promise<ChatSession[]> => {
+    const sessions = await getJSON<ChatSession[]>(KEYS.chatSessions);
+    if (sessions && sessions.length > 0) return sessions;
+    const history = await getJSON<ChatMessage[]>(KEYS.chatHistory);
+    if (history && history.length > 0) {
+      const firstUserMsg = history.find(m => m.role === 'user');
+      const title = firstUserMsg ? firstUserMsg.content.slice(0, 36) + (firstUserMsg.content.length > 36 ? '…' : '') : 'Previous conversation';
+      const defaultSession: ChatSession = {
+        id: 'default-session',
+        title,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        mode: 'period',
+        language: 'en',
+        messages: history,
+      };
+      await setJSON(KEYS.chatSessions, [defaultSession]);
+      return [defaultSession];
+    }
+    return [];
+  },
+
+  async saveChatSession(session: ChatSession): Promise<ChatSession[]> {
+    const all = await this.getChatSessions();
+    const updated = [session, ...all.filter(s => s.id !== session.id)]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    await setJSON(KEYS.chatSessions, updated);
+    await setJSON(KEYS.chatHistory, session.messages.slice(-100));
+    return updated;
+  },
+
+  async deleteChatSession(id: string): Promise<ChatSession[]> {
+    const all = await this.getChatSessions();
+    const updated = all.filter(s => s.id !== id);
+    await setJSON(KEYS.chatSessions, updated);
+    if (updated.length > 0) {
+      await setJSON(KEYS.chatHistory, updated[0].messages.slice(-100));
+    } else {
+      await setJSON(KEYS.chatHistory, []);
+    }
+    return updated;
+  },
 
   // ── Dismissed info flags (flagId → day dismissed) ──
   getDismissedFlags: async (): Promise<Record<string, LogDay>> => (await getJSON<Record<string, LogDay>>(KEYS.flagsDismissed)) ?? {},

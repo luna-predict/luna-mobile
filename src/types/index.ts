@@ -305,3 +305,13 @@ export interface ChatMessage {
   tier?: 'local' | 'p2p';
   timestamp?: string;
 }
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  mode: AppMode | 'partner';
+  language: CoachLanguage;
+  messages: ChatMessage[];
+}

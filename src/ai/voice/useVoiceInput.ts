@@ -7,13 +7,14 @@ import { ModelManager } from '../../services/ModelManager';
 import { CoachLanguage } from '../../types';
 
 /**
- * Hold-to-talk voice input: record on-device (m4a, 16 kHz mono), then Whisper turns it into
+ * Voice input: record on-device (m4a, 16 kHz mono), then Whisper turns it into
  * text via QVAC. Audio never leaves the phone. Auto-stops at 60 s.
+ * Supports pause, resume, cancel, and stop.
  */
 
 const MAX_MS = 60_000;
 
-export type VoiceState = 'idle' | 'recording' | 'transcribing';
+export type VoiceState = 'idle' | 'recording' | 'paused' | 'transcribing';
 
 export function voiceAvailable(): { ok: boolean; reason?: string } {
   if (coachEngine.kind() !== 'qvac') return { ok: false, reason: 'Voice needs the LunaPredict app build (not Expo Go).' };
@@ -49,8 +50,42 @@ export function useVoiceInput(language: CoachLanguage, onText: (text: string) =>
     }
   }, [recorder, onError]);
 
+  const pause = useCallback(() => {
+    if (state !== 'recording') return;
+    try {
+      recorder.pause();
+      setState('paused');
+    } catch {
+      // ignore
+    }
+  }, [recorder, state]);
+
+  const resume = useCallback(() => {
+    if (state !== 'paused') return;
+    try {
+      recorder.record();
+      setState('recording');
+    } catch {
+      // ignore
+    }
+  }, [recorder, state]);
+
+  const cancel = useCallback(async () => {
+    if (state !== 'recording' && state !== 'paused') return;
+    stopping.current = true;
+    try {
+      await recorder.stop();
+      await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
+    } catch {
+      // ignore
+    } finally {
+      stopping.current = false;
+      setState('idle');
+    }
+  }, [recorder, state]);
+
   const stop = useCallback(async () => {
-    if (stopping.current || state !== 'recording') return;
+    if (stopping.current || (state !== 'recording' && state !== 'paused')) return;
     stopping.current = true;
     try {
       await recorder.stop();
@@ -73,5 +108,16 @@ export function useVoiceInput(language: CoachLanguage, onText: (text: string) =>
     if (state === 'recording' && status.durationMillis >= MAX_MS) stop();
   }, [state, status.durationMillis, stop]);
 
-  return { state, start, stop, durationMs: status.durationMillis, metering: status.metering };
+  return {
+    state,
+    start,
+    stop,
+    pause,
+    resume,
+    cancel,
+    durationMs: status.durationMillis,
+    metering: status.metering,
+    isRecording: state === 'recording',
+    isPaused: state === 'paused',
+  };
 }

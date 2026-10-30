@@ -11,6 +11,7 @@ import { HealthFlag } from '../types';
 export * from './theme';
 export { ToastProvider, useToast } from './Toast';
 export { Sheet } from './Sheet';
+export { FormattedMessage } from './FormattedMessage';
 
 export type IconType = React.ComponentType<{ color?: string; size?: number; strokeWidth?: number }>;
 
